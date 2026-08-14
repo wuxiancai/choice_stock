@@ -139,6 +139,63 @@ def _fetch_ths_sector_frame():
     return ak.stock_fund_flow_industry(symbol="即时")
 
 
+def _fetch_tencent_sector_rows(trade_date: str) -> list[dict]:
+    """Aggregate Tencent's live stock flow feed by Tushare's industry classification."""
+    import akshare as ak
+
+    def fetch_frame():
+        return ak.stock_zh_a_spot_tx()
+
+    try:
+        frame = fetch_frame()
+    except Exception as exc:
+        if "proxy" not in str(exc).lower():
+            raise
+        with without_http_proxy():
+            frame = fetch_frame()
+    try:
+        basics = _ts().stock_basic(exchange="", list_status="L", fields="ts_code,industry")
+    except Exception as exc:
+        raise ProviderError(f"腾讯行情已返回，但行业分类读取失败：{exc}") from exc
+
+    industry_by_code = dict(zip(basics["ts_code"], basics["industry"]))
+
+    def to_ts_code(code: str) -> str | None:
+        raw = str(code).lower()
+        if len(raw) < 3:
+            return None
+        exchange, number = raw[:2], raw[2:]
+        return f"{number}.{exchange.upper()}" if exchange in {"sh", "sz", "bj"} else None
+
+    grouped: dict[str, dict[str, float]] = {}
+    for raw in frame.to_dict(orient="records"):
+        ts_code = to_ts_code(raw.get("code", ""))
+        industry = industry_by_code.get(ts_code) if ts_code else None
+        pct_chg = _as_number(raw.get("zdf"))
+        net_inflow = _as_number(raw.get("zljlr"), 10_000)  # Tencent reports this field in 万元.
+        turnover = _as_number(raw.get("turnover"), 10_000) or 0
+        if not industry or pct_chg is None or net_inflow is None:
+            continue
+        aggregate = grouped.setdefault(str(industry), {"net_inflow": 0, "weighted_change": 0, "weight": 0, "count": 0})
+        weight = turnover if turnover > 0 else 1
+        aggregate["net_inflow"] += net_inflow
+        aggregate["weighted_change"] += pct_chg * weight
+        aggregate["weight"] += weight
+        aggregate["count"] += 1
+
+    rows = [
+        {
+            "trade_date": trade_date, "sector_code": industry, "sector_name": industry,
+            "pct_chg": values["weighted_change"] / values["weight"],
+            "amount": values["net_inflow"], "main_net_inflow": values["net_inflow"], "source": "tencent",
+        }
+        for industry, values in grouped.items() if values["count"] > 0 and values["weight"] > 0
+    ]
+    if len(rows) < MIN_VALID_SECTOR_ROWS:
+        raise ProviderError(f"腾讯仅聚合到 {len(rows)} 个有效行业，少于完整性下限 {MIN_VALID_SECTOR_ROWS}")
+    return rows
+
+
 def _fetch_eastmoney_sector_history(symbol: str, start_date: str, end_date: str):
     """Fetch one industry's daily price and fund-flow history, retrying without a broken proxy."""
     import akshare as ak
@@ -222,11 +279,15 @@ def fetch_sectors(trade_date: str) -> SectorFetchResult:
         ("tushare_dc", lambda: _fetch_tushare_dc_sector_frame(trade_date)),
         ("eastmoney", _fetch_eastmoney_sector_frame_with_retry),
         ("ths", _fetch_ths_sector_frame),
+        ("tencent", lambda: _fetch_tencent_sector_rows(trade_date)),
     )
     failures = []
     for source, fetch_frame in providers:
         try:
-            return SectorFetchResult(_normalize_sector_rows(fetch_frame(), trade_date, source), source, failures)
+            rows = fetch_frame()
+            if source == "tencent":
+                return SectorFetchResult(rows, source, failures)
+            return SectorFetchResult(_normalize_sector_rows(rows, trade_date, source), source, failures)
         except Exception as exc:
             failures.append(f"{source}: {exc}")
     def concise_failure(failure: str) -> str:

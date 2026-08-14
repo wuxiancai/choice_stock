@@ -209,13 +209,15 @@ def test_sector_fetch_preserves_proxy_and_direct_failures():
     with patch("app.providers._fetch_tushare_ths_sector_frame", side_effect=ProviderError("无权限")), \
          patch("app.providers._fetch_tushare_dc_sector_frame", side_effect=ProviderError("无权限")), \
          patch("app.providers._fetch_sector_frame", side_effect=[RuntimeError("ProxyError: proxy down"), RuntimeError("direct DNS failure")]), \
-         patch("app.providers._fetch_ths_sector_frame", side_effect=RuntimeError("ths unavailable")):
+         patch("app.providers._fetch_ths_sector_frame", side_effect=RuntimeError("ths unavailable")), \
+         patch("app.providers._fetch_tencent_sector_rows", side_effect=RuntimeError("tencent unavailable")):
         try:
             fetch_sectors("20260101")
         except ProviderError as exc:
             assert "tushare_ths: 无接口访问权限" in str(exc)
             assert "eastmoney:" in str(exc)
             assert "ths: ths unavailable" in str(exc)
+            assert "tencent: tencent unavailable" in str(exc)
             assert "https://" not in str(exc)
         else:
             raise AssertionError("Expected the failed proxy retry to raise ProviderError")
@@ -244,3 +246,20 @@ def test_sector_fetch_uses_independent_ths_backup_when_higher_priority_sources_f
     }
     assert len(result.rows) == 30
     assert len(result.fallback_errors) == 3
+
+
+def test_sector_fetch_uses_tencent_when_all_prior_sources_fail():
+    tencent_rows = [
+        {"trade_date": "20260101", "sector_code": f"i{index}", "sector_name": f"腾讯行业{index}",
+         "pct_chg": 1.0, "amount": 100, "main_net_inflow": 100, "source": "tencent"}
+        for index in range(30)
+    ]
+    with patch("app.providers._fetch_tushare_ths_sector_frame", side_effect=ProviderError("无权限")), \
+         patch("app.providers._fetch_tushare_dc_sector_frame", side_effect=ProviderError("无权限")), \
+         patch("app.providers._fetch_eastmoney_sector_frame_with_retry", side_effect=RuntimeError("bad response")), \
+         patch("app.providers._fetch_ths_sector_frame", side_effect=RuntimeError("no tables")), \
+         patch("app.providers._fetch_tencent_sector_rows", return_value=tencent_rows):
+        result = fetch_sectors("20260101")
+    assert result.source == "tencent"
+    assert result.rows == tencent_rows
+    assert len(result.fallback_errors) == 4
