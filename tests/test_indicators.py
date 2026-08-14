@@ -1,6 +1,6 @@
 from app.indicators import calculate
 from app.providers import ProviderError, SectorFetchResult, fetch_sectors
-from app.services import dashboard, format_cny, format_trade_date, normalize_signal_filters, recent_system_errors, record_system_error, sync_latest
+from app.services import dashboard, format_cny, format_datetime, format_trade_date, normalize_signal_filters, recent_system_errors, record_system_error, sync_latest
 from app.config import settings
 from app.database import connect, initialize
 from jinja2 import Environment, FileSystemLoader
@@ -30,6 +30,11 @@ def test_format_cny_uses_yi_or_wan_with_source_unit_multiplier():
     assert format_cny(None) == "—"
 
 
+def test_standard_display_time_formats_date_and_shanghai_time():
+    assert format_trade_date("20280814") == "2028-08-14"
+    assert format_datetime("2028-08-14T06:35:03+00:00") == "2028-08-14 14:35:03"
+
+
 def test_signal_filters_accept_supported_metrics_and_ignore_removed_metrics():
     filters = normalize_signal_filters({"min_volume_ratio": "1.2", "max_pb": "5", "min_macd": "0", "min_pct_chg": "2"})
     assert filters == {"min_volume_ratio": 1.2, "max_pb": 5.0}
@@ -39,6 +44,7 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     environment = Environment(loader=FileSystemLoader("app/templates"))
     environment.filters["cny"] = format_cny
     environment.filters["trade_date"] = format_trade_date
+    environment.filters["datetime"] = format_datetime
     template = environment.get_template("index.html")
     signal = {
         "name": "测试", "ts_code": "000001.SZ", "score": 0, "macd": 0, "kdj_j": 0,
@@ -207,9 +213,10 @@ def test_sector_fetch_preserves_proxy_and_direct_failures():
         try:
             fetch_sectors("20260101")
         except ProviderError as exc:
-            assert "ProxyError: proxy down" in str(exc)
-            assert "direct DNS failure" in str(exc)
-            assert "ths unavailable" in str(exc)
+            assert "tushare_ths: 无接口访问权限" in str(exc)
+            assert "eastmoney:" in str(exc)
+            assert "ths: ths unavailable" in str(exc)
+            assert "https://" not in str(exc)
         else:
             raise AssertionError("Expected the failed proxy retry to raise ProviderError")
 

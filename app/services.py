@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from .config import settings
 from .database import connect, initialize
@@ -31,8 +32,21 @@ def format_cny(value: float | int | None, multiplier: float = 1) -> str:
 
 
 def format_trade_date(trade_date: str) -> str:
-    """Format a YYYYMMDD trade date for compact table headers."""
-    return f"{int(trade_date[4:6])}月{int(trade_date[6:8])}日"
+    """Format a YYYYMMDD trade date for display."""
+    return f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
+
+
+def format_datetime(value: str | None) -> str:
+    """Render persisted timestamps in the configured local timezone."""
+    if not value:
+        return "—"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(ZoneInfo(settings.timezone)).strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return value
 
 
 def record_system_error(source: str, error: Exception | str) -> None:

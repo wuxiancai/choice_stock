@@ -229,7 +229,20 @@ def fetch_sectors(trade_date: str) -> SectorFetchResult:
             return SectorFetchResult(_normalize_sector_rows(fetch_frame(), trade_date, source), source, failures)
         except Exception as exc:
             failures.append(f"{source}: {exc}")
-    raise ProviderError("行业资金流所有来源均失败：" + "；".join(failures))
+    def concise_failure(failure: str) -> str:
+        source, _, detail = failure.partition(": ")
+        lowered = detail.lower()
+        if "无接口" in detail or "无权限" in detail or "access permission" in lowered:
+            detail = "无接口访问权限"
+        elif "expecting value" in lowered or "json" in lowered:
+            detail = "返回无效数据"
+        elif "no tables found" in lowered:
+            detail = "未返回行业表"
+        elif len(detail) > 80:
+            detail = detail[:77] + "..."
+        return f"{source}: {detail}"
+
+    raise ProviderError("行业资金流所有来源均失败（" + "；".join(concise_failure(item) for item in failures) + "）")
 
 
 def fetch_sector_history(trade_dates: list[str], sector_names: list[str]) -> tuple[list[dict], list[str]]:
