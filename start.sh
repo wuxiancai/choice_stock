@@ -10,4 +10,4 @@ mkdir -p data
 nohup .venv/bin/python -m uvicorn app.main:app --host "$HOST" --port "$PORT" >>"$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"; sleep 1
 kill -0 "$(cat "$PID_FILE")" 2>/dev/null || { tail -80 "$LOG_FILE"; exit 1; }
-echo "已启动：http://127.0.0.1:${PORT}（日志：$LOG_FILE）"
+echo "已启动：http://127.0.0.1:${PORT}（日志：${LOG_FILE}）"
