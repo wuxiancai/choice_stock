@@ -92,19 +92,22 @@ def sync_latest() -> dict:
         trade_date = available_dates[-1]
         # 最新日额外获取主力资金，覆盖前面的纯历史日线记录。
         quotes.extend(fetch_quotes(trade_date, include_moneyflow=True))
-        sectors, sector_error = [], ""
+        sectors, sector_error, sector_source = [], "", ""
         try:
-            sectors = fetch_sectors(trade_date)
+            sector_result = fetch_sectors(trade_date)
+            sectors, sector_source = sector_result.rows, sector_result.source
+            if sector_result.fallback_errors:
+                sector_error = f"行业资金流已降级至 {sector_source}：" + "；".join(sector_result.fallback_errors)
         except ProviderError as exc:
             sector_error = str(exc)
             record_system_error("sync_latest.sectors", exc)
         with connect() as conn:
             conn.executemany("""INSERT OR REPLACE INTO daily_quotes (trade_date,ts_code,name,open,high,low,close,pct_chg,vol,amount,turnover_rate,volume_ratio,total_mv,pe,pb,source,main_net_inflow) VALUES (:trade_date,:ts_code,:name,:open,:high,:low,:close,:pct_chg,:vol,:amount,:turnover_rate,:volume_ratio,:total_mv,:pe,:pb,'tushare',:main_net_inflow)""", quotes)
-            conn.executemany("""INSERT OR REPLACE INTO sector_snapshots VALUES (:trade_date,:sector_code,:sector_name,:pct_chg,:amount,:main_net_inflow,'eastmoney')""", sectors)
+            conn.executemany("""INSERT OR REPLACE INTO sector_snapshots (trade_date,sector_code,sector_name,pct_chg,amount,main_net_inflow,source) VALUES (:trade_date,:sector_code,:sector_name,:pct_chg,:amount,:main_net_inflow,:source)""", sectors)
             conn.execute("UPDATE sync_runs SET finished_at=?,trade_date=?,status=?,source=?,message=?,quote_count=?,sector_count=? WHERE id=?",
-                (datetime.now(timezone.utc).isoformat(), trade_date, "partial" if sector_error else "success", "tushare,eastmoney", sector_error, len({row["ts_code"] for row in quotes if row["trade_date"] == trade_date}), len(sectors), run_id))
+                (datetime.now(timezone.utc).isoformat(), trade_date, "partial" if not sectors else "success", f"tushare,{sector_source}" if sector_source else "tushare", sector_error, len({row["ts_code"] for row in quotes if row["trade_date"] == trade_date}), len(sectors), run_id))
         calculate_signals(trade_date)
-        return {"trade_date": trade_date, "quote_count": len(quotes), "sector_count": len(sectors), "status": "partial" if sector_error else "success", "message": sector_error}
+        return {"trade_date": trade_date, "quote_count": len(quotes), "sector_count": len(sectors), "status": "partial" if not sectors else "success", "message": sector_error}
     except Exception as exc:
         with connect() as conn:
             conn.execute("UPDATE sync_runs SET finished_at=?,status=?,message=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), "failed", str(exc), run_id))

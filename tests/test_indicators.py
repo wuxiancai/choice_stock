@@ -1,5 +1,5 @@
 from app.indicators import calculate
-from app.providers import ProviderError, fetch_sectors
+from app.providers import ProviderError, SectorFetchResult, fetch_sectors
 from app.services import normalize_signal_filters, recent_system_errors, record_system_error, sync_latest
 from app.config import settings
 from app.database import initialize
@@ -78,8 +78,8 @@ def test_sector_fetch_retries_once_without_proxy_after_proxy_error():
     snapshots = []
 
     class EmptyFrame:
-        def itertuples(self):
-            return []
+        def to_dict(self, orient):
+            return [{"行业": "测试行业", "今日涨跌幅": 1.2, "今日主力净流入_净额": 100}]
 
     def fetch_frame():
         snapshots.append({key: os.environ.get(key) for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")})
@@ -88,19 +88,48 @@ def test_sector_fetch_retries_once_without_proxy_after_proxy_error():
         return EmptyFrame()
 
     with patch.dict(os.environ, {"HTTP_PROXY": "http://proxy", "HTTPS_PROXY": "http://proxy", "ALL_PROXY": "http://proxy"}, clear=False), \
+         patch("app.providers._fetch_tushare_ths_sector_frame", side_effect=ProviderError("无权限")), \
+         patch("app.providers._fetch_tushare_dc_sector_frame", side_effect=ProviderError("无权限")), \
          patch("app.providers._fetch_sector_frame", side_effect=fetch_frame):
-        assert fetch_sectors("20260101") == []
+        result = fetch_sectors("20260101")
+        assert result.source == "eastmoney"
+        assert len(result.rows) == 1
         assert snapshots[0]["HTTP_PROXY"] == "http://proxy"
         assert snapshots[1] == {"HTTP_PROXY": None, "HTTPS_PROXY": None, "ALL_PROXY": None}
         assert os.environ["HTTP_PROXY"] == "http://proxy"
 
 
 def test_sector_fetch_preserves_proxy_and_direct_failures():
-    with patch("app.providers._fetch_sector_frame", side_effect=[RuntimeError("ProxyError: proxy down"), RuntimeError("direct DNS failure")]):
+    with patch("app.providers._fetch_tushare_ths_sector_frame", side_effect=ProviderError("无权限")), \
+         patch("app.providers._fetch_tushare_dc_sector_frame", side_effect=ProviderError("无权限")), \
+         patch("app.providers._fetch_sector_frame", side_effect=[RuntimeError("ProxyError: proxy down"), RuntimeError("direct DNS failure")]), \
+         patch("app.providers._fetch_ths_sector_frame", side_effect=RuntimeError("ths unavailable")):
         try:
             fetch_sectors("20260101")
         except ProviderError as exc:
             assert "ProxyError: proxy down" in str(exc)
             assert "direct DNS failure" in str(exc)
+            assert "ths unavailable" in str(exc)
         else:
             raise AssertionError("Expected the failed proxy retry to raise ProviderError")
+
+
+def test_sector_fetch_uses_independent_ths_backup_when_higher_priority_sources_fail():
+    class ThsFrame:
+        def to_dict(self, orient):
+            assert orient == "records"
+            return [{"行业": "半导体", "行业-涨跌幅": "2.50%", "净额": "1.25"}]
+
+    with patch("app.providers._fetch_tushare_ths_sector_frame", side_effect=ProviderError("无权限")), \
+         patch("app.providers._fetch_tushare_dc_sector_frame", side_effect=ProviderError("无权限")), \
+         patch("app.providers._fetch_eastmoney_sector_frame_with_retry", side_effect=RuntimeError("空响应")), \
+         patch("app.providers._fetch_ths_sector_frame", return_value=ThsFrame()):
+        result = fetch_sectors("20260101")
+
+    assert isinstance(result, SectorFetchResult)
+    assert result.source == "ths"
+    assert result.rows == [{
+        "trade_date": "20260101", "sector_code": "半导体", "sector_name": "半导体",
+        "pct_chg": 2.5, "amount": 125000000.0, "main_net_inflow": 125000000.0, "source": "ths",
+    }]
+    assert len(result.fallback_errors) == 3
