@@ -5,7 +5,15 @@ from datetime import datetime, timezone
 
 from .database import connect, initialize
 from .indicators import calculate
-from .providers import ProviderError, fetch_quotes, fetch_sectors, latest_trade_date
+from .providers import ProviderError, fetch_quotes, fetch_sectors, recent_trade_dates
+
+
+def missing_trade_dates(trade_dates: list[str], existing_dates: set[str]) -> list[str]:
+    return [trade_date for trade_date in trade_dates if trade_date not in existing_dates]
+
+
+def is_unavailable_daily_error(error: Exception) -> bool:
+    return "无日线数据" in str(error)
 
 
 def sync_latest() -> dict:
@@ -13,8 +21,30 @@ def sync_latest() -> dict:
     with connect() as conn:
         run_id = conn.execute("INSERT INTO sync_runs(started_at,status) VALUES (?,?)", (started, "running")).lastrowid
     try:
-        trade_date = latest_trade_date()
-        quotes = fetch_quotes(trade_date)
+        # 日历可能先于日线发布。多取候选日，以确保最后至少能获得 90 个实际可用交易日。
+        trade_dates = recent_trade_dates(120)
+        with connect() as conn:
+            existing_dates = {row[0] for row in conn.execute(
+                "SELECT DISTINCT trade_date FROM daily_quotes WHERE trade_date IN (%s)" % ",".join("?" * len(trade_dates)),
+                trade_dates,
+            )}
+        dates_to_fetch = missing_trade_dates(trade_dates, existing_dates)
+        quotes = []
+        unavailable_dates = set()
+        for sync_date in dates_to_fetch:
+            try:
+                quotes.extend(fetch_quotes(sync_date, include_moneyflow=False))
+            except ProviderError as exc:
+                if is_unavailable_daily_error(exc):
+                    unavailable_dates.add(sync_date)
+                    continue
+                raise
+        available_dates = [sync_date for sync_date in trade_dates if sync_date not in unavailable_dates]
+        if len(available_dates) < 90:
+            raise ProviderError(f"仅找到 {len(available_dates)} 个有日线的交易日，无法满足 90 日回补")
+        trade_date = available_dates[-1]
+        # 最新日额外获取主力资金，覆盖前面的纯历史日线记录。
+        quotes.extend(fetch_quotes(trade_date, include_moneyflow=True))
         sectors, sector_error = [], ""
         try:
             sectors = fetch_sectors(trade_date)
@@ -24,7 +54,7 @@ def sync_latest() -> dict:
             conn.executemany("""INSERT OR REPLACE INTO daily_quotes (trade_date,ts_code,name,open,high,low,close,pct_chg,vol,amount,source,main_net_inflow) VALUES (:trade_date,:ts_code,:name,:open,:high,:low,:close,:pct_chg,:vol,:amount,'tushare',:main_net_inflow)""", quotes)
             conn.executemany("""INSERT OR REPLACE INTO sector_snapshots VALUES (:trade_date,:sector_code,:sector_name,:pct_chg,:amount,:main_net_inflow,'eastmoney')""", sectors)
             conn.execute("UPDATE sync_runs SET finished_at=?,trade_date=?,status=?,source=?,message=?,quote_count=?,sector_count=? WHERE id=?",
-                (datetime.now(timezone.utc).isoformat(), trade_date, "partial" if sector_error else "success", "tushare,eastmoney", sector_error, len(quotes), len(sectors), run_id))
+                (datetime.now(timezone.utc).isoformat(), trade_date, "partial" if sector_error else "success", "tushare,eastmoney", sector_error, len({row["ts_code"] for row in quotes if row["trade_date"] == trade_date}), len(sectors), run_id))
         calculate_signals(trade_date)
         return {"trade_date": trade_date, "quote_count": len(quotes), "sector_count": len(sectors), "status": "partial" if sector_error else "success", "message": sector_error}
     except Exception as exc:

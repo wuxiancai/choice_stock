@@ -20,35 +20,45 @@ def _ts():
         raise ProviderError(f"Tushare 初始化失败：{exc}") from exc
 
 
-def latest_trade_date() -> str:
+def recent_trade_dates(days: int = 90) -> list[str]:
+    if days < 1:
+        raise ValueError("交易日数量必须至少为 1")
     pro = _ts()
     end = date.today()
-    start = end - timedelta(days=14)
+    start = end - timedelta(days=max(days * 3, 30))
     try:
         calendar = pro.trade_cal(exchange="SSE", start_date=start.strftime("%Y%m%d"), end_date=end.strftime("%Y%m%d"), is_open="1")
         if calendar.empty:
             raise ProviderError("Tushare 未返回近期开市日")
-        return str(calendar.iloc[-1]["cal_date"])
+        dates = sorted(str(value) for value in calendar["cal_date"])
+        if len(dates) < days:
+            raise ProviderError(f"Tushare 仅返回 {len(dates)} 个开市日，少于要求的 {days} 个")
+        return dates[-days:]
     except ProviderError:
         raise
     except Exception as exc:
         raise ProviderError(f"读取交易日历失败：{exc}") from exc
 
 
-def fetch_quotes(trade_date: str) -> list[dict]:
+def latest_trade_date() -> str:
+    return recent_trade_dates(1)[0]
+
+
+def fetch_quotes(trade_date: str, *, name_map: dict[str, str] | None = None, include_moneyflow: bool = True) -> list[dict]:
     pro = _ts()
     try:
         frame = pro.daily(trade_date=trade_date)
         if frame.empty:
             raise ProviderError(f"{trade_date} 无日线数据（可能尚未收盘或无权限）")
         try:
-            money = pro.moneyflow(trade_date=trade_date)
-            flow_map = {r.ts_code: float((r.buy_elg_amount or 0) - (r.sell_elg_amount or 0)) * 1000 for r in money.itertuples()}
+            money = pro.moneyflow(trade_date=trade_date) if include_moneyflow else None
+            flow_map = {} if money is None else {r.ts_code: float((r.buy_elg_amount or 0) - (r.sell_elg_amount or 0)) * 1000 for r in money.itertuples()}
         except Exception:
             # Tushare 权限不足时不臆造个股主力资金，保留为 0 并由运行记录可见。
             flow_map = {}
-        names = pro.stock_basic(exchange="", list_status="L", fields="ts_code,name")
-        name_map = dict(zip(names.ts_code, names.name))
+        if name_map is None:
+            names = pro.stock_basic(exchange="", list_status="L", fields="ts_code,name")
+            name_map = dict(zip(names.ts_code, names.name))
         return [{"trade_date": trade_date, "ts_code": r.ts_code, "name": name_map.get(r.ts_code, r.ts_code), "open": r.open, "high": r.high, "low": r.low, "close": r.close, "pct_chg": r.pct_chg, "vol": r.vol, "amount": r.amount, "main_net_inflow": flow_map.get(r.ts_code, 0)} for r in frame.itertuples()]
     except ProviderError:
         raise
