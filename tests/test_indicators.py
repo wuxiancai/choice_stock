@@ -83,6 +83,27 @@ def test_dashboard_adds_daily_sector_ranks(tmp_path):
         object.__setattr__(settings, "data_dir", original_data_dir)
 
 
+def test_dashboard_keeps_five_trade_date_headers_when_sector_history_is_incomplete(tmp_path):
+    original_data_dir = settings.data_dir
+    object.__setattr__(settings, "data_dir", tmp_path)
+    dates = ["20260807", "20260810", "20260811", "20260812", "20260813"]
+    try:
+        initialize()
+        with connect() as conn:
+            conn.executemany(
+                "INSERT INTO daily_quotes(trade_date,ts_code,source) VALUES (?,?,?)",
+                [(trade_date, "000001.SZ", "test") for trade_date in dates],
+            )
+            conn.execute("INSERT INTO sync_runs(started_at,trade_date,status) VALUES (?,?,?)", ("now", dates[-1], "partial"))
+            conn.execute("INSERT INTO sector_snapshots VALUES (?,?,?,?,?,?,?)", (dates[-1], "a", "行业A", 1, None, 1, "test"))
+        result = dashboard()
+        assert result["sector_dates"] == dates[::-1]
+        assert result["sector_snapshot_dates"] == [dates[-1]]
+        assert result["sectors"][0]["daily_ranks"] == {date: (1 if date == dates[-1] else None) for date in dates}
+    finally:
+        object.__setattr__(settings, "data_dir", original_data_dir)
+
+
 def test_system_errors_are_persisted_and_tushare_token_is_redacted(tmp_path):
     original_data_dir = settings.data_dir
     original_token = settings.tushare_token
@@ -135,10 +156,11 @@ def test_sync_backfills_the_previous_four_sector_trade_dates(tmp_path):
         initialize()
         with patch("app.services.recent_trade_dates", return_value=dates), \
              patch("app.services.fetch_quotes", return_value=[]), \
-             patch("app.services.fetch_sectors", return_value=SectorFetchResult(latest_rows, "eastmoney", [])), \
+             patch("app.services.fetch_sectors", return_value=SectorFetchResult(latest_rows, "ths", ["tushare_ths: 无权限", "eastmoney: 超时"])), \
              patch("app.services.fetch_sector_history", return_value=(history_rows, [])) as history_fetch:
             result = sync_latest()
         assert result["status"] == "success"
+        assert result["message"] == ""
         history_fetch.assert_called_once_with(history_dates, [f"行业{index}" for index in range(30)])
         with connect() as conn:
             persisted_dates = [row[0] for row in conn.execute("SELECT DISTINCT trade_date FROM sector_snapshots ORDER BY trade_date")]

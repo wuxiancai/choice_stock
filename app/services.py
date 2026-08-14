@@ -124,8 +124,9 @@ def sync_latest() -> dict:
         try:
             sector_result = fetch_sectors(trade_date)
             sectors, sector_source = sector_result.rows, sector_result.source
-            if sector_result.fallback_errors:
-                sector_errors.append(f"行业资金流已降级至 {sector_source}：" + "；".join(sector_result.fallback_errors))
+            # A fallback that returned a complete data set is successful. Keep the
+            # selected source in sync_runs.source, but do not surface failed probes
+            # as a user-facing error.
             missing_history_dates = [date for date in sector_trade_dates[:-1] if date not in existing_sector_dates]
             if missing_history_dates:
                 history_rows, history_failures = fetch_sector_history(
@@ -191,9 +192,21 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
     filters = normalize_signal_filters(raw_filters or {})
     with connect() as conn:
         run = conn.execute("SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1").fetchone()
-        dates = [r[0] for r in conn.execute("SELECT DISTINCT trade_date FROM sector_snapshots ORDER BY trade_date DESC LIMIT 5")][::-1]
-        sector_rows = conn.execute("SELECT * FROM sector_snapshots WHERE trade_date IN (%s) ORDER BY trade_date DESC,pct_chg DESC" % ",".join("?" * len(dates)), dates).fetchall() if dates else []
         signal_date = run["trade_date"] if run and run["trade_date"] else ""
+        if signal_date:
+            dates = [r[0] for r in conn.execute(
+                "SELECT DISTINCT trade_date FROM daily_quotes WHERE trade_date <= ? ORDER BY trade_date DESC LIMIT 5",
+                (signal_date,),
+            )][::-1]
+        else:
+            dates = []
+        if not dates:
+            dates = [r[0] for r in conn.execute("SELECT DISTINCT trade_date FROM sector_snapshots ORDER BY trade_date DESC LIMIT 5")][::-1]
+        sector_rows = conn.execute("SELECT * FROM sector_snapshots WHERE trade_date IN (%s) ORDER BY trade_date DESC,pct_chg DESC" % ",".join("?" * len(dates)), dates).fetchall() if dates else []
+        sector_snapshot_dates = [r[0] for r in conn.execute(
+            "SELECT DISTINCT trade_date FROM sector_snapshots WHERE trade_date IN (%s) ORDER BY trade_date" % ",".join("?" * len(dates)),
+            dates,
+        )] if dates else []
         if signal_date:
             conditions, params = ["trade_date=?"], [signal_date]
             for key, value in filters.items():
@@ -234,6 +247,6 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
         })
     sectors.sort(key=lambda row: (row["five_day_change"] is None, -(row["five_day_change"] or 0), row["sector_name"]))
     return {
-        "run": dict(run) if run else None, "dates": dates, "sector_dates": dates[::-1], "sectors": sectors,
+        "run": dict(run) if run else None, "dates": dates, "sector_dates": dates[::-1], "sector_snapshot_dates": sector_snapshot_dates, "sectors": sectors,
         "signals": [dict(x) for x in signals], "filters": filters, "system_errors": recent_system_errors(),
     }
