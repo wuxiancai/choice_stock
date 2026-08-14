@@ -134,7 +134,10 @@ def sync_latest() -> dict:
                 )
                 sectors.extend(history_rows)
                 if history_failures:
-                    sector_errors.append("历史行业快照缺失：" + "；".join(history_failures[:10]))
+                    sector_errors.append(
+                        f"历史行业快照暂未回填：{len(history_failures)} 个行业的东方财富历史接口不可用；"
+                        "当日板块数据正常，稍后重试即可。"
+                    )
         except ProviderError as exc:
             sector_errors.append(str(exc))
             record_system_error("sync_latest.sectors", exc)
@@ -245,7 +248,7 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
             "five_day_change": five_day_change,
             "latest_change": latest["pct_chg"] if latest else None,
         })
-    sectors.sort(key=lambda row: (row["five_day_change"] is None, -(row["five_day_change"] or 0), row["sector_name"]))
+    sectors.sort(key=lambda row: (row["latest_change"] is None, -(row["latest_change"] or 0), row["sector_name"]))
     return {
         "run": dict(run) if run else None, "dates": dates, "sector_dates": dates[::-1], "sector_snapshot_dates": sector_snapshot_dates, "sectors": sectors,
         "signals": [dict(x) for x in signals], "filters": filters, "system_errors": recent_system_errors(),

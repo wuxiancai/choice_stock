@@ -244,8 +244,7 @@ def fetch_sector_history(trade_dates: list[str], sector_names: list[str]) -> tup
     wanted_dates = set(trade_dates)
     start_date, end_date = min(trade_dates), max(trade_dates)
 
-    def normalize(symbol: str) -> list[dict]:
-        flow_frame, price_frame = _fetch_eastmoney_sector_history(symbol, start_date, end_date)
+    def normalize(symbol: str, flow_frame, price_frame) -> list[dict]:
         flows = {
             str(row["日期"]).replace("-", ""): _as_number(row["主力净流入-净额"])
             for row in flow_frame.to_dict(orient="records")
@@ -267,10 +266,20 @@ def fetch_sector_history(trade_dates: list[str], sector_names: list[str]) -> tup
         return rows
 
     rows, failures = [], []
-    # Per-industry history is an independent public endpoint. Bounded concurrency keeps
-    # the first five-day backfill responsive without overwhelming the upstream service.
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        futures = {executor.submit(normalize, name): name for name in sorted(set(sector_names))}
+    names = sorted(set(sector_names))
+    # Warm AKShare's shared industry-name map once. Without this, multiple workers can
+    # request the same Eastmoney mapping simultaneously and trigger 502/rate limits.
+    first_name, remaining_names = names[0], names[1:]
+    try:
+        rows.extend(normalize(first_name, *_fetch_eastmoney_sector_history(first_name, start_date, end_date)))
+    except Exception as exc:
+        failures.append(f"{first_name}: {exc}")
+    # Keep public history requests deliberately low-concurrency after the cache warmup.
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {
+            executor.submit(lambda name: normalize(name, *_fetch_eastmoney_sector_history(name, start_date, end_date)), name): name
+            for name in remaining_names
+        }
         for future in as_completed(futures):
             name = futures[future]
             try:

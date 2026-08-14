@@ -42,13 +42,14 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     template = environment.get_template("index.html")
     signal = {
         "name": "测试", "ts_code": "000001.SZ", "score": 0, "macd": 0, "kdj_j": 0,
-        "rsi14": 0, "boll_position": 0, "nine_turn": 0, "volume_ratio": None,
+        "rsi14": 0, "boll_position": 0, "nine_turn": 4, "volume_ratio": None,
         "turnover_rate": None, "amount": 100, "total_mv": None, "pe": None, "pb": None,
         "pct_chg": None, "main_net_inflow": None, "reasons": "[]",
     }
     html = template.render(dashboard={"run": None, "dates": [], "sector_dates": [], "sectors": [], "signals": [signal], "filters": {}, "system_errors": []})
     assert "000001.SZ" in html
     assert "—" in html
+    assert ">4</td>" in html
     assert 'id="signal-table"' in html
     assert 'data-sort-type="number"' in html
     filter_section = html.split('<div class="card"><h2>当日技术信号</h2>', 1)[0]
@@ -79,6 +80,7 @@ def test_dashboard_adds_daily_sector_ranks(tmp_path):
             ("行业C", {"20260812": 1, "20260813": None}, None, None),
             ("行业D", {"20260812": 2, "20260813": None}, None, None),
         ]
+        assert result["sectors"][0]["latest_change"] == 1.2
     finally:
         object.__setattr__(settings, "data_dir", original_data_dir)
 
