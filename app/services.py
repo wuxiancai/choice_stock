@@ -1,0 +1,61 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+
+from .database import connect, initialize
+from .indicators import calculate
+from .providers import ProviderError, fetch_quotes, fetch_sectors, latest_trade_date
+
+
+def sync_latest() -> dict:
+    started = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        run_id = conn.execute("INSERT INTO sync_runs(started_at,status) VALUES (?,?)", (started, "running")).lastrowid
+    try:
+        trade_date = latest_trade_date()
+        quotes = fetch_quotes(trade_date)
+        sectors, sector_error = [], ""
+        try:
+            sectors = fetch_sectors(trade_date)
+        except ProviderError as exc:
+            sector_error = str(exc)
+        with connect() as conn:
+            conn.executemany("""INSERT OR REPLACE INTO daily_quotes VALUES (:trade_date,:ts_code,:name,:open,:high,:low,:close,:pct_chg,:vol,:amount,'tushare')""", quotes)
+            conn.executemany("""INSERT OR REPLACE INTO sector_snapshots VALUES (:trade_date,:sector_code,:sector_name,:pct_chg,:amount,:main_net_inflow,'eastmoney')""", sectors)
+            conn.execute("UPDATE sync_runs SET finished_at=?,trade_date=?,status=?,source=?,message=?,quote_count=?,sector_count=? WHERE id=?",
+                (datetime.now(timezone.utc).isoformat(), trade_date, "partial" if sector_error else "success", "tushare,eastmoney", sector_error, len(quotes), len(sectors), run_id))
+        calculate_signals(trade_date)
+        return {"trade_date": trade_date, "quote_count": len(quotes), "sector_count": len(sectors), "status": "partial" if sector_error else "success", "message": sector_error}
+    except Exception as exc:
+        with connect() as conn:
+            conn.execute("UPDATE sync_runs SET finished_at=?,status=?,message=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), "failed", str(exc), run_id))
+        raise
+
+
+def calculate_signals(trade_date: str) -> None:
+    with connect() as conn:
+        codes = [r[0] for r in conn.execute("SELECT DISTINCT ts_code FROM daily_quotes")]
+        for code in codes:
+            rows = conn.execute("SELECT * FROM daily_quotes WHERE ts_code=? ORDER BY trade_date DESC LIMIT 40", (code,)).fetchall()[::-1]
+            if len(rows) < 26 or rows[-1]["trade_date"] != trade_date:
+                continue
+            v = calculate([r["close"] for r in rows], [r["high"] for r in rows], [r["low"] for r in rows])
+            score, reasons = 0, []
+            for key, threshold, label in (("macd", 0, "MACD 金叉区间"), ("kdj_j", 50, "KDJ 偏强"), ("rsi14", 50, "RSI 强势")):
+                if v[key] > threshold:
+                    score += 25; reasons.append(label)
+            if v["nine_turn"] >= 8:
+                score += 25; reasons.append("九转上行")
+            conn.execute("INSERT OR REPLACE INTO stock_signals VALUES (?,?,?,?,?,?,?,?,?,?,?)", (trade_date, code, rows[-1]["name"], score, v["macd"], v["kdj_j"], v["rsi14"], v["boll_position"], v["nine_turn"], json.dumps(reasons, ensure_ascii=False), "tushare"))
+
+
+def dashboard() -> dict:
+    initialize()
+    with connect() as conn:
+        run = conn.execute("SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1").fetchone()
+        dates = [r[0] for r in conn.execute("SELECT DISTINCT trade_date FROM sector_snapshots ORDER BY trade_date DESC LIMIT 5")][::-1]
+        sectors = conn.execute("SELECT * FROM sector_snapshots WHERE trade_date IN (%s) ORDER BY trade_date DESC,pct_chg DESC" % ",".join("?" * len(dates)), dates).fetchall() if dates else []
+        signal_date = run["trade_date"] if run and run["trade_date"] else ""
+        signals = conn.execute("SELECT * FROM stock_signals WHERE trade_date=? ORDER BY score DESC LIMIT 30", (signal_date,)).fetchall() if signal_date else []
+    return {"run": dict(run) if run else None, "dates": dates, "sectors": [dict(x) for x in sectors], "signals": [dict(x) for x in signals]}

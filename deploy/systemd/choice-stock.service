@@ -1,0 +1,15 @@
+[Unit]
+Description=Choice Stock nightly analysis
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/choice-stock
+EnvironmentFile=/opt/choice-stock/.env
+ExecStart=/opt/choice-stock/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8012
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

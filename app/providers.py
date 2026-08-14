@@ -1,0 +1,68 @@
+from __future__ import annotations
+
+from datetime import date, timedelta
+
+from .config import settings
+
+
+class ProviderError(RuntimeError):
+    pass
+
+
+def _ts():
+    if not settings.tushare_token or settings.tushare_token.startswith("replace-"):
+        raise ProviderError("未配置 TUSHARE_TOKEN；请在 .env 设置，密钥不会显示在页面或日志中")
+    try:
+        import tushare as ts
+        ts.set_token(settings.tushare_token)
+        return ts.pro_api()
+    except Exception as exc:
+        raise ProviderError(f"Tushare 初始化失败：{exc}") from exc
+
+
+def latest_trade_date() -> str:
+    pro = _ts()
+    end = date.today()
+    start = end - timedelta(days=14)
+    try:
+        calendar = pro.trade_cal(exchange="SSE", start_date=start.strftime("%Y%m%d"), end_date=end.strftime("%Y%m%d"), is_open="1")
+        if calendar.empty:
+            raise ProviderError("Tushare 未返回近期开市日")
+        return str(calendar.iloc[-1]["cal_date"])
+    except ProviderError:
+        raise
+    except Exception as exc:
+        raise ProviderError(f"读取交易日历失败：{exc}") from exc
+
+
+def fetch_quotes(trade_date: str) -> list[dict]:
+    pro = _ts()
+    try:
+        frame = pro.daily(trade_date=trade_date)
+        if frame.empty:
+            raise ProviderError(f"{trade_date} 无日线数据（可能尚未收盘或无权限）")
+        basics = pro.daily_basic(trade_date=trade_date, fields="ts_code,trade_date,turnover_rate,volume_ratio,total_mv")
+        names = pro.stock_basic(exchange="", list_status="L", fields="ts_code,name")
+        name_map = dict(zip(names.ts_code, names.name))
+        return [{"trade_date": trade_date, "ts_code": r.ts_code, "name": name_map.get(r.ts_code, r.ts_code), "open": r.open, "high": r.high, "low": r.low, "close": r.close, "pct_chg": r.pct_chg, "vol": r.vol, "amount": r.amount} for r in frame.itertuples()]
+    except ProviderError:
+        raise
+    except Exception as exc:
+        raise ProviderError(f"拉取 Tushare 日线失败：{exc}") from exc
+
+
+def fetch_sectors(trade_date: str) -> list[dict]:
+    """东方财富行业资金流公开接口，经 AKShare 封装；失败不影响日线信号。"""
+    try:
+        import akshare as ak
+        frame = ak.stock_sector_fund_flow_rank(indicator="今日", sector_type="行业资金流")
+        rows = []
+        for r in frame.itertuples():
+            name = str(getattr(r, "行业", getattr(r, "名称", "未知板块")))
+            rows.append({"trade_date": trade_date, "sector_code": name, "sector_name": name,
+                         "pct_chg": float(getattr(r, "今日涨跌幅", 0) or 0),
+                         "amount": float(getattr(r, "今日主力净流入_净额", 0) or 0),
+                         "main_net_inflow": float(getattr(r, "今日主力净流入_净额", 0) or 0)})
+        return rows
+    except Exception as exc:
+        raise ProviderError(f"东方财富行业资金流拉取失败：{exc}") from exc
