@@ -1,14 +1,63 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-python3.12}"
-if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-  echo "需要 Python 3.12+。请先安装 python3.12，或以 PYTHON_BIN=/path/to/python3.12 bash deploy.sh 指定。" >&2; exit 1
+
+is_python_312_or_newer() {
+  command -v "$1" >/dev/null 2>&1 && "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1
+}
+
+privileged() {
+  if [[ "$EUID" -eq 0 ]]; then "$@"; else sudo "$@"; fi
+}
+
+install_python_312() {
+  case "$(uname -s)" in
+    Darwin)
+      if ! command -v brew >/dev/null 2>&1; then
+        echo "未找到 Homebrew，正在安装…"
+        NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        if [[ -x /opt/homebrew/bin/brew ]]; then eval "$(/opt/homebrew/bin/brew shellenv)"; fi
+        if [[ -x /usr/local/bin/brew ]]; then eval "$(/usr/local/bin/brew shellenv)"; fi
+      fi
+      echo "正在通过 Homebrew 安装 Python 3.12…"
+      brew install python@3.12
+      PYTHON_BIN="$(brew --prefix python@3.12)/bin/python3.12"
+      ;;
+    Linux)
+      [[ -r /etc/os-release ]] && . /etc/os-release || true
+      if [[ "${ID:-}" != "ubuntu" && "${ID_LIKE:-}" != *"ubuntu"* ]]; then
+        echo "当前 Linux 发行版未支持自动安装 Python 3.12；请设置 PYTHON_BIN 后重试。" >&2; exit 1
+      fi
+      echo "正在通过 apt 安装 Python 3.12 与构建依赖…"
+      privileged apt-get update
+      if ! apt-cache show python3.12 >/dev/null 2>&1; then
+        privileged apt-get install -y software-properties-common
+        privileged add-apt-repository -y ppa:deadsnakes/ppa
+        privileged apt-get update
+      fi
+      privileged apt-get install -y python3.12 python3.12-venv python3.12-dev build-essential
+      PYTHON_BIN="python3.12"
+      ;;
+    *) echo "不支持的系统：$(uname -s)" >&2; exit 1 ;;
+  esac
+}
+
+PYTHON_BIN="${PYTHON_BIN:-}"
+if [[ -n "$PYTHON_BIN" ]]; then
+  if ! is_python_312_or_newer "$PYTHON_BIN"; then
+    echo "PYTHON_BIN=$PYTHON_BIN 不是可用的 Python 3.12+ 解释器，改用自动安装。"
+    PYTHON_BIN=""
+  fi
+else
+  for candidate in python3.12 python3 python; do
+    if is_python_312_or_newer "$candidate"; then PYTHON_BIN="$candidate"; break; fi
+  done
 fi
-"$PYTHON_BIN" - <<'PY'
-import sys
-assert sys.version_info >= (3, 12), f"当前版本 {sys.version.split()[0]}，需要 Python 3.12+"
-PY
+if [[ -z "$PYTHON_BIN" ]]; then install_python_312; fi
+if ! is_python_312_or_newer "$PYTHON_BIN"; then
+  echo "Python 3.12 安装后仍不可用，请检查 PATH 或以 PYTHON_BIN 指定解释器。" >&2; exit 1
+fi
+echo "使用解释器：$($PYTHON_BIN --version)"
 cd "$ROOT_DIR"
 "$PYTHON_BIN" -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
