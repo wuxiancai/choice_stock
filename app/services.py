@@ -10,8 +10,8 @@ from .providers import ProviderError, fetch_quotes, fetch_sectors, recent_trade_
 
 
 FILTER_METRICS = (
-    "score", "macd", "kdj_j", "rsi14", "boll_position", "nine_turn", "main_net_inflow",
-    "volume_ratio", "turnover_rate", "amount", "total_mv", "pe", "pb", "pct_chg",
+    "score", "nine_turn", "main_net_inflow", "volume_ratio", "turnover_rate", "amount",
+    "total_mv", "pe", "pb",
 )
 
 

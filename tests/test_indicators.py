@@ -13,8 +13,8 @@ def test_calculate_returns_all_requested_technical_metrics():
     assert 0 <= metrics["rsi14"] <= 100
 
 
-def test_signal_filters_accept_every_supported_metric_and_ignore_invalid_values():
-    filters = normalize_signal_filters({"min_volume_ratio": "1.2", "max_pb": "5", "min_pct_chg": "bad"})
+def test_signal_filters_accept_supported_metrics_and_ignore_removed_metrics():
+    filters = normalize_signal_filters({"min_volume_ratio": "1.2", "max_pb": "5", "min_macd": "0", "min_pct_chg": "2"})
     assert filters == {"min_volume_ratio": 1.2, "max_pb": 5.0}
 
 
@@ -31,6 +31,9 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     assert "—" in html
     assert 'id="signal-table"' in html
     assert 'data-sort-type="number"' in html
+    filter_section = html.split('<div class="card"><h2>当日技术信号</h2>', 1)[0]
+    for field in ("macd", "kdj_j", "rsi14", "boll_position", "pct_chg"):
+        assert f'name="min_{field}"' not in filter_section
 
 
 def test_system_errors_are_persisted_and_tushare_token_is_redacted(tmp_path):
