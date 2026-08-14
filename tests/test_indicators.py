@@ -29,6 +29,8 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     html = template.render(dashboard={"run": None, "dates": [], "sectors": [], "signals": [signal], "filters": {}})
     assert "000001.SZ" in html
     assert "—" in html
+    assert 'id="signal-table"' in html
+    assert 'data-sort-type="number"' in html
 
 
 def test_system_errors_are_persisted_and_tushare_token_is_redacted(tmp_path):
