@@ -20,6 +20,7 @@ class SectorFetchResult:
 
 
 _PROXY_ENV_KEYS = ("ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "all_proxy", "https_proxy", "http_proxy")
+MIN_VALID_SECTOR_ROWS = 30
 
 
 @contextmanager
@@ -165,16 +166,19 @@ def _normalize_sector_rows(frame, trade_date: str, source: str) -> list[dict]:
             continue
         # 同花顺网页表头为“净额(亿)”，但 pandas 解析后的值不再保留“亿”后缀。
         net_multiplier = 100_000_000 if source == "ths" else 1
+        pct_chg = _as_number(_first_value(raw, "pct_change", "pct_chg", "行业-涨跌幅", "今日涨跌幅"))
         net_amount = _as_number(
             _first_value(raw, "net_amount", "净额", "今日主力净流入_净额"), net_multiplier,
         )
+        if pct_chg is None or net_amount is None:
+            continue
         rows.append({
             "trade_date": trade_date, "sector_code": str(name), "sector_name": str(name),
-            "pct_chg": _as_number(_first_value(raw, "pct_change", "pct_chg", "行业-涨跌幅", "今日涨跌幅")),
+            "pct_chg": pct_chg,
             "amount": net_amount, "main_net_inflow": net_amount, "source": source,
         })
-    if not rows:
-        raise ProviderError(f"{source} 未返回有效行业资金流数据")
+    if len(rows) < MIN_VALID_SECTOR_ROWS:
+        raise ProviderError(f"{source} 仅返回 {len(rows)} 条有效行业资金流数据，少于完整性下限 {MIN_VALID_SECTOR_ROWS}")
     return rows
 
 

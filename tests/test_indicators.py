@@ -79,7 +79,10 @@ def test_sector_fetch_retries_once_without_proxy_after_proxy_error():
 
     class EmptyFrame:
         def to_dict(self, orient):
-            return [{"行业": "测试行业", "今日涨跌幅": 1.2, "今日主力净流入_净额": 100}]
+            return [
+                {"行业": f"测试行业{index}", "今日涨跌幅": 1.2, "今日主力净流入_净额": 100}
+                for index in range(30)
+            ]
 
     def fetch_frame():
         snapshots.append({key: os.environ.get(key) for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")})
@@ -93,7 +96,7 @@ def test_sector_fetch_retries_once_without_proxy_after_proxy_error():
          patch("app.providers._fetch_sector_frame", side_effect=fetch_frame):
         result = fetch_sectors("20260101")
         assert result.source == "eastmoney"
-        assert len(result.rows) == 1
+        assert len(result.rows) == 30
         assert snapshots[0]["HTTP_PROXY"] == "http://proxy"
         assert snapshots[1] == {"HTTP_PROXY": None, "HTTPS_PROXY": None, "ALL_PROXY": None}
         assert os.environ["HTTP_PROXY"] == "http://proxy"
@@ -118,7 +121,10 @@ def test_sector_fetch_uses_independent_ths_backup_when_higher_priority_sources_f
     class ThsFrame:
         def to_dict(self, orient):
             assert orient == "records"
-            return [{"行业": "半导体", "行业-涨跌幅": "2.50%", "净额": "1.25"}]
+            return [
+                {"行业": f"半导体{index}", "行业-涨跌幅": "2.50%", "净额": "1.25"}
+                for index in range(30)
+            ]
 
     with patch("app.providers._fetch_tushare_ths_sector_frame", side_effect=ProviderError("无权限")), \
          patch("app.providers._fetch_tushare_dc_sector_frame", side_effect=ProviderError("无权限")), \
@@ -128,8 +134,9 @@ def test_sector_fetch_uses_independent_ths_backup_when_higher_priority_sources_f
 
     assert isinstance(result, SectorFetchResult)
     assert result.source == "ths"
-    assert result.rows == [{
-        "trade_date": "20260101", "sector_code": "半导体", "sector_name": "半导体",
+    assert result.rows[0] == {
+        "trade_date": "20260101", "sector_code": "半导体0", "sector_name": "半导体0",
         "pct_chg": 2.5, "amount": 125000000.0, "main_net_inflow": 125000000.0, "source": "ths",
-    }]
+    }
+    assert len(result.rows) == 30
     assert len(result.fallback_errors) == 3
