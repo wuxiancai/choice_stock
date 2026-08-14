@@ -41,10 +41,15 @@ def fetch_quotes(trade_date: str) -> list[dict]:
         frame = pro.daily(trade_date=trade_date)
         if frame.empty:
             raise ProviderError(f"{trade_date} 无日线数据（可能尚未收盘或无权限）")
-        basics = pro.daily_basic(trade_date=trade_date, fields="ts_code,trade_date,turnover_rate,volume_ratio,total_mv")
+        try:
+            money = pro.moneyflow(trade_date=trade_date)
+            flow_map = {r.ts_code: float((r.buy_elg_amount or 0) - (r.sell_elg_amount or 0)) * 1000 for r in money.itertuples()}
+        except Exception:
+            # Tushare 权限不足时不臆造个股主力资金，保留为 0 并由运行记录可见。
+            flow_map = {}
         names = pro.stock_basic(exchange="", list_status="L", fields="ts_code,name")
         name_map = dict(zip(names.ts_code, names.name))
-        return [{"trade_date": trade_date, "ts_code": r.ts_code, "name": name_map.get(r.ts_code, r.ts_code), "open": r.open, "high": r.high, "low": r.low, "close": r.close, "pct_chg": r.pct_chg, "vol": r.vol, "amount": r.amount} for r in frame.itertuples()]
+        return [{"trade_date": trade_date, "ts_code": r.ts_code, "name": name_map.get(r.ts_code, r.ts_code), "open": r.open, "high": r.high, "low": r.low, "close": r.close, "pct_chg": r.pct_chg, "vol": r.vol, "amount": r.amount, "main_net_inflow": flow_map.get(r.ts_code, 0)} for r in frame.itertuples()]
     except ProviderError:
         raise
     except Exception as exc:

@@ -35,6 +35,9 @@ def initialize() -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
         conn.executescript(SCHEMA)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(daily_quotes)")}
+        if "main_net_inflow" not in columns:
+            conn.execute("ALTER TABLE daily_quotes ADD COLUMN main_net_inflow REAL DEFAULT 0")
 
 
 @contextmanager

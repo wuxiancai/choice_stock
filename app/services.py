@@ -21,7 +21,7 @@ def sync_latest() -> dict:
         except ProviderError as exc:
             sector_error = str(exc)
         with connect() as conn:
-            conn.executemany("""INSERT OR REPLACE INTO daily_quotes VALUES (:trade_date,:ts_code,:name,:open,:high,:low,:close,:pct_chg,:vol,:amount,'tushare')""", quotes)
+            conn.executemany("""INSERT OR REPLACE INTO daily_quotes (trade_date,ts_code,name,open,high,low,close,pct_chg,vol,amount,source,main_net_inflow) VALUES (:trade_date,:ts_code,:name,:open,:high,:low,:close,:pct_chg,:vol,:amount,'tushare',:main_net_inflow)""", quotes)
             conn.executemany("""INSERT OR REPLACE INTO sector_snapshots VALUES (:trade_date,:sector_code,:sector_name,:pct_chg,:amount,:main_net_inflow,'eastmoney')""", sectors)
             conn.execute("UPDATE sync_runs SET finished_at=?,trade_date=?,status=?,source=?,message=?,quote_count=?,sector_count=? WHERE id=?",
                 (datetime.now(timezone.utc).isoformat(), trade_date, "partial" if sector_error else "success", "tushare,eastmoney", sector_error, len(quotes), len(sectors), run_id))
@@ -47,6 +47,8 @@ def calculate_signals(trade_date: str) -> None:
                     score += 25; reasons.append(label)
             if v["nine_turn"] >= 8:
                 score += 25; reasons.append("九转上行")
+            if rows[-1]["main_net_inflow"] > 0:
+                score += 25; reasons.append("主力资金净流入")
             conn.execute("INSERT OR REPLACE INTO stock_signals VALUES (?,?,?,?,?,?,?,?,?,?,?)", (trade_date, code, rows[-1]["name"], score, v["macd"], v["kdj_j"], v["rsi14"], v["boll_position"], v["nine_turn"], json.dumps(reasons, ensure_ascii=False), "tushare"))
 
 
