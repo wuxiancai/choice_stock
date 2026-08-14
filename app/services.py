@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+from .config import settings
 from .database import connect, initialize
 from .indicators import calculate
 from .providers import ProviderError, fetch_quotes, fetch_sectors, recent_trade_dates
@@ -12,6 +13,31 @@ FILTER_METRICS = (
     "score", "macd", "kdj_j", "rsi14", "boll_position", "nine_turn", "main_net_inflow",
     "volume_ratio", "turnover_rate", "amount", "total_mv", "pe", "pb", "pct_chg",
 )
+
+
+def record_system_error(source: str, error: Exception | str) -> None:
+    """Persist a concise, browser-safe runtime error without exposing configured secrets."""
+    message = str(error)
+    if settings.tushare_token:
+        message = message.replace(settings.tushare_token, "[REDACTED]")
+    try:
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO system_logs(created_at,level,source,message) VALUES (?,?,?,?)",
+                (datetime.now(timezone.utc).isoformat(), "ERROR", source, message[:2000]),
+            )
+    except Exception:
+        # 日志落库失败不能覆盖原始运行错误。
+        pass
+
+
+def recent_system_errors(limit: int = 50) -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT created_at,level,source,message FROM system_logs WHERE level='ERROR' ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def normalize_signal_filters(raw_filters: dict[str, str]) -> dict[str, float]:
@@ -81,6 +107,7 @@ def sync_latest() -> dict:
     except Exception as exc:
         with connect() as conn:
             conn.execute("UPDATE sync_runs SET finished_at=?,status=?,message=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), "failed", str(exc), run_id))
+        record_system_error("sync_latest", exc)
         raise
 
 
@@ -131,4 +158,7 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
             ).fetchall()
         else:
             signals = []
-    return {"run": dict(run) if run else None, "dates": dates, "sectors": [dict(x) for x in sectors], "signals": [dict(x) for x in signals], "filters": filters}
+    return {
+        "run": dict(run) if run else None, "dates": dates, "sectors": [dict(x) for x in sectors],
+        "signals": [dict(x) for x in signals], "filters": filters, "system_errors": recent_system_errors(),
+    }

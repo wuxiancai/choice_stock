@@ -31,6 +31,10 @@ CREATE TABLE IF NOT EXISTS sync_runs (
   trade_date TEXT, status TEXT NOT NULL, source TEXT, message TEXT, quote_count INTEGER DEFAULT 0,
   sector_count INTEGER DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS system_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, level TEXT NOT NULL,
+  source TEXT NOT NULL, message TEXT NOT NULL
+);
 """
 
 

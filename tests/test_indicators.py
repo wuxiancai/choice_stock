@@ -1,5 +1,7 @@
 from app.indicators import calculate
-from app.services import normalize_signal_filters
+from app.services import normalize_signal_filters, recent_system_errors, record_system_error
+from app.config import settings
+from app.database import initialize
 from jinja2 import Environment, FileSystemLoader
 
 
@@ -27,3 +29,20 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     html = template.render(dashboard={"run": None, "dates": [], "sectors": [], "signals": [signal], "filters": {}})
     assert "000001.SZ" in html
     assert "—" in html
+
+
+def test_system_errors_are_persisted_and_tushare_token_is_redacted(tmp_path):
+    original_data_dir = settings.data_dir
+    original_token = settings.tushare_token
+    object.__setattr__(settings, "data_dir", tmp_path)
+    object.__setattr__(settings, "tushare_token", "secret-token")
+    try:
+        initialize()
+        record_system_error("test", RuntimeError("provider failed: secret-token"))
+        logs = recent_system_errors()
+        assert logs[0]["level"] == "ERROR"
+        assert logs[0]["source"] == "test"
+        assert logs[0]["message"] == "provider failed: [REDACTED]"
+    finally:
+        object.__setattr__(settings, "data_dir", original_data_dir)
+        object.__setattr__(settings, "tushare_token", original_token)
