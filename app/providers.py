@@ -44,7 +44,10 @@ def latest_trade_date() -> str:
     return recent_trade_dates(1)[0]
 
 
-def fetch_quotes(trade_date: str, *, name_map: dict[str, str] | None = None, include_moneyflow: bool = True) -> list[dict]:
+def fetch_quotes(
+    trade_date: str, *, name_map: dict[str, str] | None = None, include_moneyflow: bool = True,
+    include_basics: bool = True,
+) -> list[dict]:
     pro = _ts()
     try:
         frame = pro.daily(trade_date=trade_date)
@@ -59,7 +62,34 @@ def fetch_quotes(trade_date: str, *, name_map: dict[str, str] | None = None, inc
         if name_map is None:
             names = pro.stock_basic(exchange="", list_status="L", fields="ts_code,name")
             name_map = dict(zip(names.ts_code, names.name))
-        return [{"trade_date": trade_date, "ts_code": r.ts_code, "name": name_map.get(r.ts_code, r.ts_code), "open": r.open, "high": r.high, "low": r.low, "close": r.close, "pct_chg": r.pct_chg, "vol": r.vol, "amount": r.amount, "main_net_inflow": flow_map.get(r.ts_code, 0)} for r in frame.itertuples()]
+        if not include_basics:
+            basic_map = {}
+        else:
+            try:
+                basics = pro.daily_basic(
+                    trade_date=trade_date,
+                    fields="ts_code,turnover_rate,volume_ratio,pe,pb,total_mv",
+                )
+                basic_map = {r.ts_code: r for r in basics.itertuples()}
+            except Exception:
+                # 基础估值数据权限不足时保留为空，页面会显式展示缺失值。
+                basic_map = {}
+
+        def number(row, field: str):
+            value = getattr(row, field, None) if row is not None else None
+            return None if value is None else float(value)
+
+        return [{
+            "trade_date": trade_date, "ts_code": r.ts_code, "name": name_map.get(r.ts_code, r.ts_code),
+            "open": r.open, "high": r.high, "low": r.low, "close": r.close,
+            "pct_chg": r.pct_chg, "vol": r.vol, "amount": r.amount,
+            "main_net_inflow": flow_map.get(r.ts_code, 0),
+            "turnover_rate": number(basic_map.get(r.ts_code), "turnover_rate"),
+            "volume_ratio": number(basic_map.get(r.ts_code), "volume_ratio"),
+            "total_mv": number(basic_map.get(r.ts_code), "total_mv"),
+            "pe": number(basic_map.get(r.ts_code), "pe"),
+            "pb": number(basic_map.get(r.ts_code), "pb"),
+        } for r in frame.itertuples()]
     except ProviderError:
         raise
     except Exception as exc:

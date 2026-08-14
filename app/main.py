@@ -30,12 +30,12 @@ app = FastAPI(title="A股轻量选股", lifespan=lifespan)
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    return templates.TemplateResponse(request, "index.html", {"request": request, "dashboard": dashboard()})
+    return templates.TemplateResponse(request, "index.html", {"request": request, "dashboard": dashboard(dict(request.query_params))})
 
 
 @app.get("/api/dashboard")
-def api_dashboard():
-    return dashboard()
+def api_dashboard(request: Request):
+    return dashboard(dict(request.query_params))
 
 
 @app.post("/api/sync")
