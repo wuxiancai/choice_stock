@@ -1,5 +1,6 @@
 from app.indicators import calculate
 from app.services import normalize_signal_filters
+from jinja2 import Environment, FileSystemLoader
 
 
 def test_calculate_returns_all_requested_technical_metrics():
@@ -13,3 +14,16 @@ def test_calculate_returns_all_requested_technical_metrics():
 def test_signal_filters_accept_every_supported_metric_and_ignore_invalid_values():
     filters = normalize_signal_filters({"min_volume_ratio": "1.2", "max_pb": "5", "min_pct_chg": "bad"})
     assert filters == {"min_volume_ratio": 1.2, "max_pb": 5.0}
+
+
+def test_dashboard_template_renders_historical_signal_with_new_nullable_fields():
+    template = Environment(loader=FileSystemLoader("app/templates")).get_template("index.html")
+    signal = {
+        "name": "测试", "ts_code": "000001.SZ", "score": 0, "macd": 0, "kdj_j": 0,
+        "rsi14": 0, "boll_position": 0, "nine_turn": 0, "volume_ratio": None,
+        "turnover_rate": None, "amount": 100, "total_mv": None, "pe": None, "pb": None,
+        "pct_chg": None, "main_net_inflow": None, "reasons": "[]",
+    }
+    html = template.render(dashboard={"run": None, "dates": [], "sectors": [], "signals": [signal], "filters": {}})
+    assert "000001.SZ" in html
+    assert "—" in html
