@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timezone
 
 from .config import settings
@@ -28,6 +29,11 @@ def format_cny(value: float | int | None, multiplier: float = 1) -> str:
         rendered, unit = absolute / 10_000, "万"
     text = f"{rendered:.2f}".rstrip("0").rstrip(".")
     return f"{sign}{text} {unit}"
+
+
+def format_trade_date(trade_date: str) -> str:
+    """Format a YYYYMMDD trade date for compact table headers."""
+    return f"{int(trade_date[4:6])}月{int(trade_date[6:8])}日"
 
 
 def record_system_error(source: str, error: Exception | str) -> None:
@@ -177,15 +183,34 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
             ).fetchall()
         else:
             signals = []
+    snapshots_by_sector: dict[str, dict[str, dict]] = {}
+    daily_ranks: dict[str, dict[str, int]] = {}
+    for trade_date in dates:
+        rows_for_day = [dict(row) for row in sector_rows if row["trade_date"] == trade_date]
+        daily_ranks[trade_date] = {
+            row["sector_name"]: rank for rank, row in enumerate(rows_for_day, start=1)
+        }
+        for row in rows_for_day:
+            snapshots_by_sector.setdefault(row["sector_name"], {})[trade_date] = row
+
+    latest_date = dates[-1] if dates else None
     sectors = []
-    ranks_by_date: dict[str, int] = {}
-    for sector in sector_rows:
-        row = dict(sector)
-        trade_date = row["trade_date"]
-        ranks_by_date[trade_date] = ranks_by_date.get(trade_date, 0) + 1
-        row["rank"] = ranks_by_date[trade_date]
-        sectors.append(row)
+    for sector_name, snapshots in snapshots_by_sector.items():
+        available = list(snapshots.values())
+        five_day_inflow = sum((row["main_net_inflow"] or 0) for row in available)
+        daily_changes = [row["pct_chg"] for row in available if row["pct_chg"] is not None]
+        five_day_change = (math.prod(1 + change / 100 for change in daily_changes) - 1) * 100 if daily_changes else None
+        latest = snapshots.get(latest_date) if latest_date else None
+        sectors.append({
+            "sector_name": sector_name,
+            "daily_ranks": {date: daily_ranks[date].get(sector_name) for date in dates},
+            "five_day_inflow": five_day_inflow,
+            "latest_inflow": latest["main_net_inflow"] if latest else None,
+            "five_day_change": five_day_change,
+            "latest_change": latest["pct_chg"] if latest else None,
+        })
+    sectors.sort(key=lambda row: (row["five_day_change"] is None, -(row["five_day_change"] or 0), row["sector_name"]))
     return {
-        "run": dict(run) if run else None, "dates": dates, "sectors": [dict(x) for x in sectors],
+        "run": dict(run) if run else None, "dates": dates, "sector_dates": dates[::-1], "sectors": sectors,
         "signals": [dict(x) for x in signals], "filters": filters, "system_errors": recent_system_errors(),
     }

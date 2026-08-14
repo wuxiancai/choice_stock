@@ -1,6 +1,6 @@
 from app.indicators import calculate
 from app.providers import ProviderError, SectorFetchResult, fetch_sectors
-from app.services import dashboard, format_cny, normalize_signal_filters, recent_system_errors, record_system_error, sync_latest
+from app.services import dashboard, format_cny, format_trade_date, normalize_signal_filters, recent_system_errors, record_system_error, sync_latest
 from app.config import settings
 from app.database import connect, initialize
 from jinja2 import Environment, FileSystemLoader
@@ -38,6 +38,7 @@ def test_signal_filters_accept_supported_metrics_and_ignore_removed_metrics():
 def test_dashboard_template_renders_historical_signal_with_new_nullable_fields():
     environment = Environment(loader=FileSystemLoader("app/templates"))
     environment.filters["cny"] = format_cny
+    environment.filters["trade_date"] = format_trade_date
     template = environment.get_template("index.html")
     signal = {
         "name": "测试", "ts_code": "000001.SZ", "score": 0, "macd": 0, "kdj_j": 0,
@@ -45,7 +46,7 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
         "turnover_rate": None, "amount": 100, "total_mv": None, "pe": None, "pb": None,
         "pct_chg": None, "main_net_inflow": None, "reasons": "[]",
     }
-    html = template.render(dashboard={"run": None, "dates": [], "sectors": [], "signals": [signal], "filters": {}})
+    html = template.render(dashboard={"run": None, "dates": [], "sector_dates": [], "sectors": [], "signals": [signal], "filters": {}, "system_errors": []})
     assert "000001.SZ" in html
     assert "—" in html
     assert 'id="signal-table"' in html
@@ -71,9 +72,12 @@ def test_dashboard_adds_daily_sector_ranks(tmp_path):
                 ],
             )
         result = dashboard()
-        assert [(row["trade_date"], row["sector_name"], row["rank"]) for row in result["sectors"]] == [
-            ("20260813", "行业A", 1), ("20260813", "行业B", 2),
-            ("20260812", "行业C", 1), ("20260812", "行业D", 2),
+        assert result["sector_dates"] == ["20260813", "20260812"]
+        assert [(row["sector_name"], row["daily_ranks"], row["five_day_inflow"], row["latest_inflow"]) for row in result["sectors"]] == [
+            ("行业C", {"20260812": 1, "20260813": None}, 0, None),
+            ("行业A", {"20260812": None, "20260813": 1}, 100_000_000, 100_000_000),
+            ("行业D", {"20260812": 2, "20260813": None}, 0, None),
+            ("行业B", {"20260812": None, "20260813": 2}, -50_000_000, -50_000_000),
         ]
     finally:
         object.__setattr__(settings, "data_dir", original_data_dir)
