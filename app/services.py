@@ -15,6 +15,21 @@ FILTER_METRICS = (
 )
 
 
+def format_cny(value: float | int | None, multiplier: float = 1) -> str:
+    """Render a stored monetary value as readable RMB, preserving the data's source unit."""
+    if value is None:
+        return "—"
+    amount = float(value) * multiplier
+    sign = "-" if amount < 0 else ""
+    absolute = abs(amount)
+    if absolute >= 100_000_000:
+        rendered, unit = absolute / 100_000_000, "亿"
+    else:
+        rendered, unit = absolute / 10_000, "万"
+    text = f"{rendered:.2f}".rstrip("0").rstrip(".")
+    return f"{sign}{text} {unit}"
+
+
 def record_system_error(source: str, error: Exception | str) -> None:
     """Persist a concise, browser-safe runtime error without exposing configured secrets."""
     message = str(error)
@@ -148,7 +163,7 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
     with connect() as conn:
         run = conn.execute("SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1").fetchone()
         dates = [r[0] for r in conn.execute("SELECT DISTINCT trade_date FROM sector_snapshots ORDER BY trade_date DESC LIMIT 5")][::-1]
-        sectors = conn.execute("SELECT * FROM sector_snapshots WHERE trade_date IN (%s) ORDER BY trade_date DESC,pct_chg DESC" % ",".join("?" * len(dates)), dates).fetchall() if dates else []
+        sector_rows = conn.execute("SELECT * FROM sector_snapshots WHERE trade_date IN (%s) ORDER BY trade_date DESC,pct_chg DESC" % ",".join("?" * len(dates)), dates).fetchall() if dates else []
         signal_date = run["trade_date"] if run and run["trade_date"] else ""
         if signal_date:
             conditions, params = ["trade_date=?"], [signal_date]
@@ -162,6 +177,14 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
             ).fetchall()
         else:
             signals = []
+    sectors = []
+    ranks_by_date: dict[str, int] = {}
+    for sector in sector_rows:
+        row = dict(sector)
+        trade_date = row["trade_date"]
+        ranks_by_date[trade_date] = ranks_by_date.get(trade_date, 0) + 1
+        row["rank"] = ranks_by_date[trade_date]
+        sectors.append(row)
     return {
         "run": dict(run) if run else None, "dates": dates, "sectors": [dict(x) for x in sectors],
         "signals": [dict(x) for x in signals], "filters": filters, "system_errors": recent_system_errors(),

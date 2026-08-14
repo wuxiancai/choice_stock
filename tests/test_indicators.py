@@ -1,8 +1,8 @@
 from app.indicators import calculate
 from app.providers import ProviderError, SectorFetchResult, fetch_sectors
-from app.services import normalize_signal_filters, recent_system_errors, record_system_error, sync_latest
+from app.services import dashboard, format_cny, normalize_signal_filters, recent_system_errors, record_system_error, sync_latest
 from app.config import settings
-from app.database import initialize
+from app.database import connect, initialize
 from jinja2 import Environment, FileSystemLoader
 from unittest.mock import patch
 import os
@@ -16,13 +16,29 @@ def test_calculate_returns_all_requested_technical_metrics():
     assert 0 <= metrics["rsi14"] <= 100
 
 
+def test_calculate_marks_a_completed_downward_nine_turn_as_negative():
+    closes = [100 - i for i in range(35)]
+    metrics = calculate(closes, [x + 0.2 for x in closes], [x - 0.2 for x in closes])
+    assert metrics["nine_turn"] == -9
+
+
+def test_format_cny_uses_yi_or_wan_with_source_unit_multiplier():
+    assert format_cny(1_000_000_000) == "10 亿"
+    assert format_cny(9_999_0000) == "9999 万"
+    assert format_cny(-50_000_000) == "-5000 万"
+    assert format_cny(10_000, multiplier=1000) == "1000 万"
+    assert format_cny(None) == "—"
+
+
 def test_signal_filters_accept_supported_metrics_and_ignore_removed_metrics():
     filters = normalize_signal_filters({"min_volume_ratio": "1.2", "max_pb": "5", "min_macd": "0", "min_pct_chg": "2"})
     assert filters == {"min_volume_ratio": 1.2, "max_pb": 5.0}
 
 
 def test_dashboard_template_renders_historical_signal_with_new_nullable_fields():
-    template = Environment(loader=FileSystemLoader("app/templates")).get_template("index.html")
+    environment = Environment(loader=FileSystemLoader("app/templates"))
+    environment.filters["cny"] = format_cny
+    template = environment.get_template("index.html")
     signal = {
         "name": "测试", "ts_code": "000001.SZ", "score": 0, "macd": 0, "kdj_j": 0,
         "rsi14": 0, "boll_position": 0, "nine_turn": 0, "volume_ratio": None,
@@ -37,6 +53,30 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     filter_section = html.split('<div class="card"><h2>当日技术信号</h2>', 1)[0]
     for field in ("macd", "kdj_j", "rsi14", "boll_position", "pct_chg"):
         assert f'name="min_{field}"' not in filter_section
+
+
+def test_dashboard_adds_daily_sector_ranks(tmp_path):
+    original_data_dir = settings.data_dir
+    object.__setattr__(settings, "data_dir", tmp_path)
+    try:
+        initialize()
+        with connect() as conn:
+            conn.executemany(
+                "INSERT INTO sector_snapshots VALUES (?,?,?,?,?,?,?)",
+                [
+                    ("20260813", "a", "行业A", 1.2, None, 100_000_000, "test"),
+                    ("20260813", "b", "行业B", 0.5, None, -50_000_000, "test"),
+                    ("20260812", "c", "行业C", 2.0, None, 0, "test"),
+                    ("20260812", "d", "行业D", 1.0, None, 0, "test"),
+                ],
+            )
+        result = dashboard()
+        assert [(row["trade_date"], row["sector_name"], row["rank"]) for row in result["sectors"]] == [
+            ("20260813", "行业A", 1), ("20260813", "行业B", 2),
+            ("20260812", "行业C", 1), ("20260812", "行业D", 2),
+        ]
+    finally:
+        object.__setattr__(settings, "data_dir", original_data_dir)
 
 
 def test_system_errors_are_persisted_and_tushare_token_is_redacted(tmp_path):

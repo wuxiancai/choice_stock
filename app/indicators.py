@@ -33,10 +33,18 @@ def calculate(closes: list[float], highs: list[float], lows: list[float]) -> dic
     k = (2 * 50 + rsv) / 3
     d = (2 * 50 + k) / 3
     j = 3 * k - 2 * d
-    turns = 0
+    upward_turns = 0
+    downward_turns = 0
     for i in range(len(closes) - 1, max(len(closes) - 10, 3), -1):
         if closes[i] > closes[i - 4]:
-            turns += 1
+            upward_turns += 1
         else:
             break
-    return {"macd": macd, "rsi14": rsi, "boll_position": boll_position, "kdj_j": j, "nine_turn": turns}
+    for i in range(len(closes) - 1, max(len(closes) - 10, 3), -1):
+        if closes[i] < closes[i - 4]:
+            downward_turns += 1
+        else:
+            break
+    # 正数表示连续收盘价高于四日前（高位卖出提示），负数表示连续低于四日前（低位买入提示）。
+    nine_turn = upward_turns if upward_turns else -downward_turns
+    return {"macd": macd, "rsi14": rsi, "boll_position": boll_position, "kdj_j": j, "nine_turn": nine_turn}

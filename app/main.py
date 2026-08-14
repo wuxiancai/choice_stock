@@ -10,10 +10,11 @@ from fastapi.templating import Jinja2Templates
 
 from .config import settings
 from .database import initialize
-from .services import dashboard, record_system_error, sync_latest
+from .services import dashboard, format_cny, record_system_error, sync_latest
 
 scheduler = BackgroundScheduler(timezone=settings.timezone)
 templates = Jinja2Templates(directory="app/templates")
+templates.env.filters["cny"] = format_cny
 
 
 @asynccontextmanager
