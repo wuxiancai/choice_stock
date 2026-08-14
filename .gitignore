@@ -2,6 +2,8 @@
 .env
 data/*.db
 data/*.db-*
+data/*.pid
+data/*.log
 __pycache__/
 .pytest_cache/
 *.py[cod]
