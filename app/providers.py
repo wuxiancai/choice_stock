@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from contextlib import contextmanager
 from datetime import date, timedelta
 
 from .config import settings
@@ -7,6 +9,19 @@ from .config import settings
 
 class ProviderError(RuntimeError):
     pass
+
+
+_PROXY_ENV_KEYS = ("ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "all_proxy", "https_proxy", "http_proxy")
+
+
+@contextmanager
+def without_http_proxy():
+    """Temporarily bypass a broken local proxy for a public-data retry."""
+    previous = {key: os.environ.pop(key) for key in _PROXY_ENV_KEYS if key in os.environ}
+    try:
+        yield
+    finally:
+        os.environ.update(previous)
 
 
 def _ts():
@@ -96,11 +111,26 @@ def fetch_quotes(
         raise ProviderError(f"拉取 Tushare 日线失败：{exc}") from exc
 
 
+def _fetch_sector_frame():
+    import akshare as ak
+    return ak.stock_sector_fund_flow_rank(indicator="今日", sector_type="行业资金流")
+
+
 def fetch_sectors(trade_date: str) -> list[dict]:
     """东方财富行业资金流公开接口，经 AKShare 封装；失败不影响日线信号。"""
     try:
-        import akshare as ak
-        frame = ak.stock_sector_fund_flow_rank(indicator="今日", sector_type="行业资金流")
+        try:
+            frame = _fetch_sector_frame()
+        except Exception as exc:
+            if "proxy" not in str(exc).lower():
+                raise
+            try:
+                with without_http_proxy():
+                    frame = _fetch_sector_frame()
+            except Exception as direct_exc:
+                raise ProviderError(
+                    f"东方财富行业资金流拉取失败：代理请求失败（{exc}）；直连重试失败（{direct_exc}）"
+                ) from direct_exc
         rows = []
         for r in frame.itertuples():
             name = str(getattr(r, "行业", getattr(r, "名称", "未知板块")))
@@ -109,5 +139,7 @@ def fetch_sectors(trade_date: str) -> list[dict]:
                          "amount": float(getattr(r, "今日主力净流入_净额", 0) or 0),
                          "main_net_inflow": float(getattr(r, "今日主力净流入_净额", 0) or 0)})
         return rows
+    except ProviderError:
+        raise
     except Exception as exc:
         raise ProviderError(f"东方财富行业资金流拉取失败：{exc}") from exc

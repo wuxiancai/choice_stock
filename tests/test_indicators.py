@@ -1,8 +1,11 @@
 from app.indicators import calculate
-from app.services import normalize_signal_filters, recent_system_errors, record_system_error
+from app.providers import ProviderError, fetch_sectors
+from app.services import normalize_signal_filters, recent_system_errors, record_system_error, sync_latest
 from app.config import settings
 from app.database import initialize
 from jinja2 import Environment, FileSystemLoader
+from unittest.mock import patch
+import os
 
 
 def test_calculate_returns_all_requested_technical_metrics():
@@ -51,3 +54,53 @@ def test_system_errors_are_persisted_and_tushare_token_is_redacted(tmp_path):
     finally:
         object.__setattr__(settings, "data_dir", original_data_dir)
         object.__setattr__(settings, "tushare_token", original_token)
+
+
+def test_partial_sector_sync_persists_provider_error(tmp_path):
+    original_data_dir = settings.data_dir
+    object.__setattr__(settings, "data_dir", tmp_path)
+    dates = [f"202601{i:02d}" for i in range(1, 91)]
+    try:
+        initialize()
+        with patch("app.services.recent_trade_dates", return_value=dates), \
+             patch("app.services.fetch_quotes", return_value=[]), \
+             patch("app.services.fetch_sectors", side_effect=ProviderError("东方财富行业资金流拉取失败：代理不可用")):
+            result = sync_latest()
+        assert result["status"] == "partial"
+        logs = recent_system_errors()
+        assert logs[0]["source"] == "sync_latest.sectors"
+        assert "代理不可用" in logs[0]["message"]
+    finally:
+        object.__setattr__(settings, "data_dir", original_data_dir)
+
+
+def test_sector_fetch_retries_once_without_proxy_after_proxy_error():
+    snapshots = []
+
+    class EmptyFrame:
+        def itertuples(self):
+            return []
+
+    def fetch_frame():
+        snapshots.append({key: os.environ.get(key) for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")})
+        if len(snapshots) == 1:
+            raise RuntimeError("ProxyError: connection reset")
+        return EmptyFrame()
+
+    with patch.dict(os.environ, {"HTTP_PROXY": "http://proxy", "HTTPS_PROXY": "http://proxy", "ALL_PROXY": "http://proxy"}, clear=False), \
+         patch("app.providers._fetch_sector_frame", side_effect=fetch_frame):
+        assert fetch_sectors("20260101") == []
+        assert snapshots[0]["HTTP_PROXY"] == "http://proxy"
+        assert snapshots[1] == {"HTTP_PROXY": None, "HTTPS_PROXY": None, "ALL_PROXY": None}
+        assert os.environ["HTTP_PROXY"] == "http://proxy"
+
+
+def test_sector_fetch_preserves_proxy_and_direct_failures():
+    with patch("app.providers._fetch_sector_frame", side_effect=[RuntimeError("ProxyError: proxy down"), RuntimeError("direct DNS failure")]):
+        try:
+            fetch_sectors("20260101")
+        except ProviderError as exc:
+            assert "ProxyError: proxy down" in str(exc)
+            assert "direct DNS failure" in str(exc)
+        else:
+            raise AssertionError("Expected the failed proxy retry to raise ProviderError")

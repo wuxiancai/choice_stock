@@ -97,6 +97,7 @@ def sync_latest() -> dict:
             sectors = fetch_sectors(trade_date)
         except ProviderError as exc:
             sector_error = str(exc)
+            record_system_error("sync_latest.sectors", exc)
         with connect() as conn:
             conn.executemany("""INSERT OR REPLACE INTO daily_quotes (trade_date,ts_code,name,open,high,low,close,pct_chg,vol,amount,turnover_rate,volume_ratio,total_mv,pe,pb,source,main_net_inflow) VALUES (:trade_date,:ts_code,:name,:open,:high,:low,:close,:pct_chg,:vol,:amount,:turnover_rate,:volume_ratio,:total_mv,:pe,:pb,'tushare',:main_net_inflow)""", quotes)
             conn.executemany("""INSERT OR REPLACE INTO sector_snapshots VALUES (:trade_date,:sector_code,:sector_name,:pct_chg,:amount,:main_net_inflow,'eastmoney')""", sectors)
