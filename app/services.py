@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-import math
 from datetime import datetime, timezone
 
 from .config import settings
 from .database import connect, initialize
 from .indicators import calculate
-from .providers import ProviderError, fetch_quotes, fetch_sectors, recent_trade_dates
+from .providers import MIN_VALID_SECTOR_ROWS, ProviderError, fetch_quotes, fetch_sector_history, fetch_sectors, recent_trade_dates
 
 
 FILTER_METRICS = (
@@ -113,22 +112,46 @@ def sync_latest() -> dict:
         trade_date = available_dates[-1]
         # 最新日额外获取主力资金，覆盖前面的纯历史日线记录。
         quotes.extend(fetch_quotes(trade_date, include_moneyflow=True))
-        sectors, sector_error, sector_source = [], "", ""
+        sectors, sector_errors, sector_source = [], [], ""
+        sector_trade_dates = available_dates[-5:]
+        with connect() as conn:
+            existing_sector_dates = {
+                row[0] for row in conn.execute(
+                    "SELECT DISTINCT trade_date FROM sector_snapshots WHERE trade_date IN (%s)" % ",".join("?" * len(sector_trade_dates)),
+                    sector_trade_dates,
+                )
+            }
         try:
             sector_result = fetch_sectors(trade_date)
             sectors, sector_source = sector_result.rows, sector_result.source
             if sector_result.fallback_errors:
-                sector_error = f"行业资金流已降级至 {sector_source}：" + "；".join(sector_result.fallback_errors)
+                sector_errors.append(f"行业资金流已降级至 {sector_source}：" + "；".join(sector_result.fallback_errors))
+            missing_history_dates = [date for date in sector_trade_dates[:-1] if date not in existing_sector_dates]
+            if missing_history_dates:
+                history_rows, history_failures = fetch_sector_history(
+                    missing_history_dates, [row["sector_name"] for row in sectors],
+                )
+                sectors.extend(history_rows)
+                if history_failures:
+                    sector_errors.append("历史行业快照缺失：" + "；".join(history_failures[:10]))
         except ProviderError as exc:
-            sector_error = str(exc)
+            sector_errors.append(str(exc))
             record_system_error("sync_latest.sectors", exc)
         with connect() as conn:
             conn.executemany("""INSERT OR REPLACE INTO daily_quotes (trade_date,ts_code,name,open,high,low,close,pct_chg,vol,amount,turnover_rate,volume_ratio,total_mv,pe,pb,source,main_net_inflow) VALUES (:trade_date,:ts_code,:name,:open,:high,:low,:close,:pct_chg,:vol,:amount,:turnover_rate,:volume_ratio,:total_mv,:pe,:pb,'tushare',:main_net_inflow)""", quotes)
             conn.executemany("""INSERT OR REPLACE INTO sector_snapshots (trade_date,sector_code,sector_name,pct_chg,amount,main_net_inflow,source) VALUES (:trade_date,:sector_code,:sector_name,:pct_chg,:amount,:main_net_inflow,:source)""", sectors)
+            completed_sector_dates = {
+                row[0] for row in conn.execute(
+                    "SELECT trade_date FROM sector_snapshots WHERE trade_date IN (%s) GROUP BY trade_date HAVING COUNT(*) >= ?" % ",".join("?" * len(sector_trade_dates)),
+                    [*sector_trade_dates, MIN_VALID_SECTOR_ROWS],
+                )
+            }
+            sector_error = "；".join(sector_errors)
+            sector_complete = set(sector_trade_dates) <= completed_sector_dates
             conn.execute("UPDATE sync_runs SET finished_at=?,trade_date=?,status=?,source=?,message=?,quote_count=?,sector_count=? WHERE id=?",
-                (datetime.now(timezone.utc).isoformat(), trade_date, "partial" if not sectors else "success", f"tushare,{sector_source}" if sector_source else "tushare", sector_error, len({row["ts_code"] for row in quotes if row["trade_date"] == trade_date}), len(sectors), run_id))
+                (datetime.now(timezone.utc).isoformat(), trade_date, "success" if sector_complete else "partial", f"tushare,{sector_source}" if sector_source else "tushare", sector_error, len({row["ts_code"] for row in quotes if row["trade_date"] == trade_date}), len(sectors), run_id))
         calculate_signals(trade_date)
-        return {"trade_date": trade_date, "quote_count": len(quotes), "sector_count": len(sectors), "status": "partial" if not sectors else "success", "message": sector_error}
+        return {"trade_date": trade_date, "quote_count": len(quotes), "sector_count": len(sectors), "status": "success" if sector_complete else "partial", "message": sector_error}
     except Exception as exc:
         with connect() as conn:
             conn.execute("UPDATE sync_runs SET finished_at=?,status=?,message=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), "failed", str(exc), run_id))
@@ -197,9 +220,9 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
     sectors = []
     for sector_name, snapshots in snapshots_by_sector.items():
         available = list(snapshots.values())
-        five_day_inflow = sum((row["main_net_inflow"] or 0) for row in available)
+        five_day_inflow = sum((row["main_net_inflow"] or 0) for row in available) / len(dates) if len(available) == len(dates) else None
         daily_changes = [row["pct_chg"] for row in available if row["pct_chg"] is not None]
-        five_day_change = (math.prod(1 + change / 100 for change in daily_changes) - 1) * 100 if daily_changes else None
+        five_day_change = sum(daily_changes) / len(dates) if len(daily_changes) == len(dates) else None
         latest = snapshots.get(latest_date) if latest_date else None
         sectors.append({
             "sector_name": sector_name,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -138,6 +139,25 @@ def _fetch_ths_sector_frame():
     return ak.stock_fund_flow_industry(symbol="即时")
 
 
+def _fetch_eastmoney_sector_history(symbol: str, start_date: str, end_date: str):
+    """Fetch one industry's daily price and fund-flow history, retrying without a broken proxy."""
+    import akshare as ak
+
+    def fetch():
+        return (
+            ak.stock_sector_fund_flow_hist(symbol=symbol),
+            ak.stock_board_industry_hist_em(symbol=symbol, start_date=start_date, end_date=end_date),
+        )
+
+    try:
+        return fetch()
+    except Exception as exc:
+        if "proxy" not in str(exc).lower():
+            raise
+        with without_http_proxy():
+            return fetch()
+
+
 def _as_number(value, multiplier: float = 1):
     if value is None or str(value).strip() in {"", "--", "-"}:
         return None
@@ -210,3 +230,51 @@ def fetch_sectors(trade_date: str) -> SectorFetchResult:
         except Exception as exc:
             failures.append(f"{source}: {exc}")
     raise ProviderError("行业资金流所有来源均失败：" + "；".join(failures))
+
+
+def fetch_sector_history(trade_dates: list[str], sector_names: list[str]) -> tuple[list[dict], list[str]]:
+    """Retrieve real daily Eastmoney history for the requested industries and trade dates.
+
+    The live rank endpoints only describe today, so historical snapshots must come from
+    the per-industry history endpoints.  Missing industries are reported rather than
+    copying today's values into prior trade dates.
+    """
+    if not trade_dates or not sector_names:
+        return [], []
+    wanted_dates = set(trade_dates)
+    start_date, end_date = min(trade_dates), max(trade_dates)
+
+    def normalize(symbol: str) -> list[dict]:
+        flow_frame, price_frame = _fetch_eastmoney_sector_history(symbol, start_date, end_date)
+        flows = {
+            str(row["日期"]).replace("-", ""): _as_number(row["主力净流入-净额"])
+            for row in flow_frame.to_dict(orient="records")
+        }
+        changes = {
+            str(row["日期"]).replace("-", ""): _as_number(row["涨跌幅"])
+            for row in price_frame.to_dict(orient="records")
+        }
+        rows = []
+        for trade_date in wanted_dates:
+            net_inflow, pct_chg = flows.get(trade_date), changes.get(trade_date)
+            if net_inflow is None or pct_chg is None:
+                continue
+            rows.append({
+                "trade_date": trade_date, "sector_code": symbol, "sector_name": symbol,
+                "pct_chg": pct_chg, "amount": net_inflow, "main_net_inflow": net_inflow,
+                "source": "eastmoney_history",
+            })
+        return rows
+
+    rows, failures = [], []
+    # Per-industry history is an independent public endpoint. Bounded concurrency keeps
+    # the first five-day backfill responsive without overwhelming the upstream service.
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = {executor.submit(normalize, name): name for name in sorted(set(sector_names))}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                rows.extend(future.result())
+            except Exception as exc:
+                failures.append(f"{name}: {exc}")
+    return rows, failures

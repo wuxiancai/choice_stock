@@ -74,10 +74,10 @@ def test_dashboard_adds_daily_sector_ranks(tmp_path):
         result = dashboard()
         assert result["sector_dates"] == ["20260813", "20260812"]
         assert [(row["sector_name"], row["daily_ranks"], row["five_day_inflow"], row["latest_inflow"]) for row in result["sectors"]] == [
-            ("行业C", {"20260812": 1, "20260813": None}, 0, None),
-            ("行业A", {"20260812": None, "20260813": 1}, 100_000_000, 100_000_000),
-            ("行业D", {"20260812": 2, "20260813": None}, 0, None),
-            ("行业B", {"20260812": None, "20260813": 2}, -50_000_000, -50_000_000),
+            ("行业A", {"20260812": None, "20260813": 1}, None, 100_000_000),
+            ("行业B", {"20260812": None, "20260813": 2}, None, -50_000_000),
+            ("行业C", {"20260812": 1, "20260813": None}, None, None),
+            ("行业D", {"20260812": 2, "20260813": None}, None, None),
         ]
     finally:
         object.__setattr__(settings, "data_dir", original_data_dir)
@@ -114,6 +114,35 @@ def test_partial_sector_sync_persists_provider_error(tmp_path):
         logs = recent_system_errors()
         assert logs[0]["source"] == "sync_latest.sectors"
         assert "代理不可用" in logs[0]["message"]
+    finally:
+        object.__setattr__(settings, "data_dir", original_data_dir)
+
+
+def test_sync_backfills_the_previous_four_sector_trade_dates(tmp_path):
+    original_data_dir = settings.data_dir
+    object.__setattr__(settings, "data_dir", tmp_path)
+    dates = [f"202601{i:02d}" for i in range(1, 91)]
+    latest_date, history_dates = dates[-1], dates[-5:-1]
+    latest_rows = [
+        {"trade_date": latest_date, "sector_code": f"s{index}", "sector_name": f"行业{index}", "pct_chg": 1.0, "amount": 100, "main_net_inflow": 100, "source": "eastmoney"}
+        for index in range(30)
+    ]
+    history_rows = [
+        {"trade_date": trade_date, "sector_code": f"s{index}", "sector_name": f"行业{index}", "pct_chg": 1.0, "amount": 100, "main_net_inflow": 100, "source": "eastmoney_history"}
+        for trade_date in history_dates for index in range(30)
+    ]
+    try:
+        initialize()
+        with patch("app.services.recent_trade_dates", return_value=dates), \
+             patch("app.services.fetch_quotes", return_value=[]), \
+             patch("app.services.fetch_sectors", return_value=SectorFetchResult(latest_rows, "eastmoney", [])), \
+             patch("app.services.fetch_sector_history", return_value=(history_rows, [])) as history_fetch:
+            result = sync_latest()
+        assert result["status"] == "success"
+        history_fetch.assert_called_once_with(history_dates, [f"行业{index}" for index in range(30)])
+        with connect() as conn:
+            persisted_dates = [row[0] for row in conn.execute("SELECT DISTINCT trade_date FROM sector_snapshots ORDER BY trade_date")]
+        assert persisted_dates == dates[-5:]
     finally:
         object.__setattr__(settings, "data_dir", original_data_dir)
 
