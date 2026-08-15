@@ -66,7 +66,15 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     assert "—" in html
     assert ">4</td>" in html
     assert 'id="signal-table"' in html
-    assert "大单+特大单" in html
+    assert 'id="sync-button"' in html
+    assert "数据研究用途，不构成投资建议。每日 21:00（上海时区）自动分析。" not in html
+    assert 'id="sector-table-wrap"' in html
+    assert "event.preventDefault()" in html
+    assert "'#' ~ row.daily_ranks" not in html
+    assert "repeat(8,minmax(0,1fr))" in html
+    assert 'class="sortable nine-turn-header"' in html
+    assert ">净流入</th>" in html
+    assert "主力净流入<br><small>大单+特大单</small>" not in html
     assert 'data-sort-type="number"' in html
     filter_section = html.split('<div class="card"><h2>当日技术信号</h2>', 1)[0]
     assert 'name="stock_code"' in filter_section
