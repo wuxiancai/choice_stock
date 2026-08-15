@@ -77,6 +77,7 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     assert 'class="sortable nine-turn-header"' in html
     assert ">净流入</th>" in html
     assert "主力净流入<br><small>大单+特大单</small>" not in html
+    assert "主力净流入（大单+特大单，元）" not in html
     assert 'data-sort-type="number"' in html
     filter_section = html.split('<div class="card"><h2>当日技术信号</h2>', 1)[0]
     assert 'name="stock_code"' in filter_section
