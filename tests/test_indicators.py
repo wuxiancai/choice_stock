@@ -41,11 +41,11 @@ def test_signal_filters_accept_supported_metrics_and_ignore_removed_metrics():
 
 
 def test_sector_source_summary_distinguishes_failed_and_unattempted_sources():
-    summary = sector_source_summary("ths", ["tushare_ths: 无权限", "eastmoney: ProxyError: disconnected"])
+    summary = sector_source_summary("ths", ["eastmoney: ProxyError: disconnected"])
     assert "当日行业数据：同花顺 成功" in summary
-    assert "Tushare 同花顺：失败（无接口访问权限）" in summary
     assert "东方财富：失败（网络/代理失败）" in summary
-    assert "未尝试：Tushare 东方财富、腾讯（前序来源已成功）" in summary
+    assert "未尝试：腾讯（前序来源已成功）" in summary
+    assert "Tushare" not in summary
 
 
 def test_dashboard_template_renders_historical_signal_with_new_nullable_fields():
@@ -176,12 +176,12 @@ def test_sync_backfills_the_previous_four_sector_trade_dates(tmp_path):
         initialize()
         with patch("app.services.recent_trade_dates", return_value=dates), \
              patch("app.services.fetch_quotes", return_value=[]), \
-             patch("app.services.fetch_sectors", return_value=SectorFetchResult(latest_rows, "ths", ["tushare_ths: 无权限", "eastmoney: 超时"])), \
+             patch("app.services.fetch_sectors", return_value=SectorFetchResult(latest_rows, "ths", ["eastmoney: 超时"])), \
              patch("app.services.fetch_sector_history", return_value=(history_rows, [])) as history_fetch:
             result = sync_latest()
         assert result["status"] == "success"
         assert "当日行业数据：同花顺 成功" in result["message"]
-        assert "Tushare 同花顺：失败（无接口访问权限）" in result["message"]
+        assert "Tushare 同花顺" not in result["message"]
         history_fetch.assert_called_once_with(history_dates, [f"行业{index}" for index in range(30)])
         with connect() as conn:
             persisted_dates = [row[0] for row in conn.execute("SELECT DISTINCT trade_date FROM sector_snapshots ORDER BY trade_date")]
@@ -234,8 +234,6 @@ def test_sector_fetch_retries_once_without_proxy_after_proxy_error():
         return EmptyFrame()
 
     with patch.dict(os.environ, {"HTTP_PROXY": "http://proxy", "HTTPS_PROXY": "http://proxy", "ALL_PROXY": "http://proxy"}, clear=False), \
-         patch("app.providers._fetch_tushare_ths_sector_frame", side_effect=ProviderError("无权限")), \
-         patch("app.providers._fetch_tushare_dc_sector_frame", side_effect=ProviderError("无权限")), \
          patch("app.providers._fetch_sector_frame", side_effect=fetch_frame):
         result = fetch_sectors("20260101")
         assert result.source == "eastmoney"
@@ -246,15 +244,12 @@ def test_sector_fetch_retries_once_without_proxy_after_proxy_error():
 
 
 def test_sector_fetch_preserves_proxy_and_direct_failures():
-    with patch("app.providers._fetch_tushare_ths_sector_frame", side_effect=ProviderError("无权限")), \
-         patch("app.providers._fetch_tushare_dc_sector_frame", side_effect=ProviderError("无权限")), \
-         patch("app.providers._fetch_sector_frame", side_effect=[RuntimeError("ProxyError: proxy down"), RuntimeError("direct DNS failure")]), \
+    with patch("app.providers._fetch_sector_frame", side_effect=[RuntimeError("ProxyError: proxy down"), RuntimeError("direct DNS failure")]), \
          patch("app.providers._fetch_ths_sector_frame", side_effect=RuntimeError("ths unavailable")), \
          patch("app.providers._fetch_tencent_sector_rows", side_effect=RuntimeError("tencent unavailable")):
         try:
             fetch_sectors("20260101")
         except ProviderError as exc:
-            assert "tushare_ths: 无接口访问权限" in str(exc)
             assert "eastmoney:" in str(exc)
             assert "ths: ths unavailable" in str(exc)
             assert "tencent: tencent unavailable" in str(exc)
@@ -272,9 +267,7 @@ def test_sector_fetch_uses_independent_ths_backup_when_higher_priority_sources_f
                 for index in range(30)
             ]
 
-    with patch("app.providers._fetch_tushare_ths_sector_frame", side_effect=ProviderError("无权限")), \
-         patch("app.providers._fetch_tushare_dc_sector_frame", side_effect=ProviderError("无权限")), \
-         patch("app.providers._fetch_eastmoney_sector_frame_with_retry", side_effect=RuntimeError("空响应")), \
+    with patch("app.providers._fetch_eastmoney_sector_frame_with_retry", side_effect=RuntimeError("空响应")), \
          patch("app.providers._fetch_ths_sector_frame", return_value=ThsFrame()):
         result = fetch_sectors("20260101")
 
@@ -285,7 +278,7 @@ def test_sector_fetch_uses_independent_ths_backup_when_higher_priority_sources_f
         "pct_chg": 2.5, "amount": 125000000.0, "main_net_inflow": 125000000.0, "source": "ths",
     }
     assert len(result.rows) == 30
-    assert len(result.fallback_errors) == 3
+    assert len(result.fallback_errors) == 1
 
 
 def test_sector_fetch_uses_tencent_when_all_prior_sources_fail():
@@ -294,12 +287,16 @@ def test_sector_fetch_uses_tencent_when_all_prior_sources_fail():
          "pct_chg": 1.0, "amount": 100, "main_net_inflow": 100, "source": "tencent"}
         for index in range(30)
     ]
-    with patch("app.providers._fetch_tushare_ths_sector_frame", side_effect=ProviderError("无权限")), \
-         patch("app.providers._fetch_tushare_dc_sector_frame", side_effect=ProviderError("无权限")), \
-         patch("app.providers._fetch_eastmoney_sector_frame_with_retry", side_effect=RuntimeError("bad response")), \
+    with patch("app.providers._fetch_eastmoney_sector_frame_with_retry", side_effect=RuntimeError("bad response")), \
          patch("app.providers._fetch_ths_sector_frame", side_effect=RuntimeError("no tables")), \
          patch("app.providers._fetch_tencent_sector_rows", return_value=tencent_rows):
         result = fetch_sectors("20260101")
     assert result.source == "tencent"
     assert result.rows == tencent_rows
-    assert len(result.fallback_errors) == 4
+    assert len(result.fallback_errors) == 2
+
+
+def test_sector_sources_do_not_include_tushare_industry_flow_endpoints():
+    """A 3,000-point account must never probe the higher-tier industry APIs."""
+    assert "moneyflow_ind_ths" not in __import__("app.providers", fromlist=["*"]).__dict__
+    assert "moneyflow_ind_dc" not in __import__("app.providers", fromlist=["*"]).__dict__

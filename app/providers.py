@@ -22,6 +22,11 @@ class SectorFetchResult:
 
 _PROXY_ENV_KEYS = ("ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "all_proxy", "https_proxy", "http_proxy")
 MIN_VALID_SECTOR_ROWS = 30
+# Tushare's public permission table confirms every endpoint called in this module
+# is available to an account with 3,000 points or fewer.  Keep this declaration
+# next to the calls so a future provider addition cannot silently reintroduce a
+# higher-tier endpoint.
+TUSHARE_3000_POINT_APIS = frozenset({"trade_cal", "daily", "daily_basic", "moneyflow", "stock_basic"})
 
 
 @contextmanager
@@ -124,14 +129,6 @@ def fetch_quotes(
 def _fetch_sector_frame():
     import akshare as ak
     return ak.stock_sector_fund_flow_rank(indicator="今日", sector_type="行业资金流")
-
-
-def _fetch_tushare_ths_sector_frame(trade_date: str):
-    return _ts().moneyflow_ind_ths(trade_date=trade_date)
-
-
-def _fetch_tushare_dc_sector_frame(trade_date: str):
-    return _ts().moneyflow_ind_dc(trade_date=trade_date)
 
 
 def _fetch_ths_sector_frame():
@@ -273,10 +270,8 @@ def _fetch_eastmoney_sector_frame_with_retry():
 
 
 def fetch_sectors(trade_date: str) -> SectorFetchResult:
-    """按 Tushare、东方财富、同花顺多源顺序取得真实行业资金流。"""
+    """Use public live industry-flow sources; Tushare industry flow needs >3,000 points."""
     providers = (
-        ("tushare_ths", lambda: _fetch_tushare_ths_sector_frame(trade_date)),
-        ("tushare_dc", lambda: _fetch_tushare_dc_sector_frame(trade_date)),
         ("eastmoney", _fetch_eastmoney_sector_frame_with_retry),
         ("ths", _fetch_ths_sector_frame),
         ("tencent", lambda: _fetch_tencent_sector_rows(trade_date)),
@@ -306,55 +301,18 @@ def fetch_sectors(trade_date: str) -> SectorFetchResult:
     raise ProviderError("行业资金流所有来源均失败（" + "；".join(concise_failure(item) for item in failures) + "）")
 
 
-def fetch_tushare_sector_history(trade_dates: list[str]) -> tuple[list[dict], list[str], list[str]]:
-    """Fetch dated industry snapshots from Tushare before using public history.
-
-    Tushare's industry-flow endpoints accept ``trade_date`` and can therefore
-    provide genuine historical snapshots when the configured account has the
-    permission.  The returned diagnostics make unavailable permissions visible
-    instead of silently skipping this higher-priority source.
-    """
-    rows, unresolved_dates, diagnostics = [], [], []
-    providers = (
-        ("Tushare 同花顺", _fetch_tushare_ths_sector_frame, "tushare_ths"),
-        ("Tushare 东方财富", _fetch_tushare_dc_sector_frame, "tushare_dc"),
-    )
-    for trade_date in trade_dates:
-        date_failures = []
-        for label, fetch, source in providers:
-            try:
-                date_rows = _normalize_sector_rows(fetch(trade_date), trade_date, source)
-                rows.extend(date_rows)
-                diagnostics.append(f"{label}：{trade_date} 成功（{len(date_rows)} 条）")
-                break
-            except Exception as exc:
-                detail = str(exc)
-                if "无权限" in detail or "无接口" in detail or "access permission" in detail.lower():
-                    detail = "无接口访问权限"
-                elif len(detail) > 100:
-                    detail = detail[:97] + "..."
-                date_failures.append(f"{label}={detail}")
-        else:
-            unresolved_dates.append(trade_date)
-            diagnostics.append(f"Tushare：{trade_date} 未回填（{'；'.join(date_failures)}）")
-    return rows, unresolved_dates, diagnostics
-
-
 def fetch_sector_history(trade_dates: list[str], sector_names: list[str]) -> tuple[list[dict], list[str]]:
-    """Retrieve real historical snapshots, preferring dated Tushare industry flows.
+    """Retrieve historical snapshots from Eastmoney's public industry endpoints.
 
-    Tushare is tried first for each requested day.  Dates still unavailable fall back
-    to Eastmoney's per-industry history endpoints.  AKShare THS and Tencent feeds are
-    intentionally not used here because their APIs are live-only and must not be
-    relabelled as historical data.
+    Tushare industry-flow APIs are deliberately not called because they exceed the
+    configured 3,000-point account tier.  THS and Tencent are live-only, so they
+    cannot be relabelled as historical data.
     """
     if not trade_dates or not sector_names:
         return [], []
-    rows, unresolved_dates, diagnostics = fetch_tushare_sector_history(trade_dates)
-    if not unresolved_dates:
-        return rows, diagnostics
-    wanted_dates = set(unresolved_dates)
-    start_date, end_date = min(unresolved_dates), max(unresolved_dates)
+    rows, diagnostics = [], []
+    wanted_dates = set(trade_dates)
+    start_date, end_date = min(trade_dates), max(trade_dates)
 
     def normalize(symbol: str, flow_frame, price_frame) -> list[dict]:
         flows = {
@@ -400,9 +358,9 @@ def fetch_sector_history(trade_dates: list[str], sector_names: list[str]) -> tup
                 failures.append(f"{name}: {exc}")
     eastmoney_successes = len({row["sector_name"] for row in rows if row["trade_date"] in wanted_dates and row["source"] == "eastmoney_history"})
     diagnostics.append(
-        f"东方财富行业历史：指定 {len(unresolved_dates)} 日，成功 {eastmoney_successes}/{len(names)} 个行业，失败 {len(failures)} 个行业"
+        f"东方财富行业历史：指定 {len(trade_dates)} 日，成功 {eastmoney_successes}/{len(names)} 个行业，失败 {len(failures)} 个行业"
     )
-    diagnostics.append("同花顺、腾讯：仅支持当日快照，历史回填未使用")
+    diagnostics.append("同花顺、腾讯：仅支持当日快照，历史回填未使用；Tushare 行业资金流超出 3000 积分权限，未调用")
     # Individual industry exceptions can contain long provider URLs and are not useful
     # in the dashboard.  The per-source summary above is actionable and keeps the
     # persistent run status readable.

@@ -111,7 +111,6 @@ def is_unavailable_daily_error(error: Exception) -> bool:
 def sector_source_summary(selected_source: str, fallback_errors: list[str]) -> str:
     """Make source selection observable without exposing raw URLs or secrets."""
     labels = {
-        "tushare_ths": "Tushare 同花顺", "tushare_dc": "Tushare 东方财富",
         "eastmoney": "东方财富", "ths": "同花顺", "tencent": "腾讯",
     }
     attempted = []
