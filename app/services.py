@@ -199,7 +199,7 @@ def sync_latest() -> dict:
                 # A new current snapshot replaces any older fallback taxonomy for
                 # this date, so five-day matrix rows remain comparable by industry.
                 conn.execute("DELETE FROM sector_snapshots WHERE trade_date=?", (trade_date,))
-            conn.executemany("""INSERT OR REPLACE INTO daily_quotes (trade_date,ts_code,name,open,high,low,close,pct_chg,vol,amount,turnover_rate,volume_ratio,total_mv,pe,pb,source,main_net_inflow) VALUES (:trade_date,:ts_code,:name,:open,:high,:low,:close,:pct_chg,:vol,:amount,:turnover_rate,:volume_ratio,:total_mv,:pe,:pb,'tushare',:main_net_inflow)""", quotes)
+            conn.executemany("""INSERT OR REPLACE INTO daily_quotes (trade_date,ts_code,name,open,high,low,close,pct_chg,vol,amount,industry,turnover_rate,volume_ratio,total_mv,pe,pb,source,main_net_inflow) VALUES (:trade_date,:ts_code,:name,:open,:high,:low,:close,:pct_chg,:vol,:amount,:industry,:turnover_rate,:volume_ratio,:total_mv,:pe,:pb,'tushare',:main_net_inflow)""", quotes)
             conn.executemany("""INSERT OR REPLACE INTO sector_snapshots (trade_date,sector_code,sector_name,pct_chg,amount,main_net_inflow,source) VALUES (:trade_date,:sector_code,:sector_name,:pct_chg,:amount,:main_net_inflow,:source)""", sectors)
             completed_sector_dates = {
                 row[0] for row in conn.execute(
@@ -241,9 +241,9 @@ def calculate_signals(trade_date: str) -> None:
                 score += 25; reasons.append("主力资金净流入")
             latest = rows[-1]
             conn.execute("""INSERT OR REPLACE INTO stock_signals
-                (trade_date,ts_code,name,score,macd,kdj_j,rsi14,boll_position,nine_turn,bbi,bias,vr,psy,dmi,main_net_inflow,volume_ratio,turnover_rate,amount,total_mv,pe,pb,pct_chg,reasons,source)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
-                trade_date, code, latest["name"], score, v["macd"], v["kdj_j"], v["rsi14"],
+                (trade_date,ts_code,name,industry,score,macd,kdj_j,rsi14,boll_position,nine_turn,bbi,bias,vr,psy,dmi,main_net_inflow,volume_ratio,turnover_rate,amount,total_mv,pe,pb,pct_chg,reasons,source)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                trade_date, code, latest["name"], latest["industry"], score, v["macd"], v["kdj_j"], v["rsi14"],
                 v["boll_position"], v["nine_turn"], v["bbi"], v["bias"], v["vr"], v["psy"], v["dmi"],
                 latest["main_net_inflow"], latest["volume_ratio"],
                 latest["turnover_rate"], latest["amount"], latest["total_mv"], latest["pe"], latest["pb"],

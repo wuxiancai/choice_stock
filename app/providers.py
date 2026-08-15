@@ -124,8 +124,11 @@ def fetch_quotes(
             # Tushare 权限不足时不臆造个股主力资金，保留为 0 并由运行记录可见。
             flow_map = {}
         if name_map is None:
-            names = pro.stock_basic(exchange="", list_status="L", fields="ts_code,name")
+            names = pro.stock_basic(exchange="", list_status="L", fields="ts_code,name,industry")
             name_map = dict(zip(names.ts_code, names.name))
+            industry_map = dict(zip(names.ts_code, names.industry))
+        else:
+            industry_map = {}
         if not include_basics:
             basic_map = {}
         else:
@@ -145,6 +148,7 @@ def fetch_quotes(
 
         return [{
             "trade_date": trade_date, "ts_code": r.ts_code, "name": name_map.get(r.ts_code, r.ts_code),
+            "industry": industry_map.get(r.ts_code),
             "open": r.open, "high": r.high, "low": r.low, "close": r.close,
             "pct_chg": r.pct_chg, "vol": r.vol, "amount": r.amount,
             "main_net_inflow": flow_map.get(r.ts_code, 0),

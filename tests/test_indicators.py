@@ -57,7 +57,7 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     environment.filters["datetime"] = format_datetime
     template = environment.get_template("index.html")
     signal = {
-        "name": "测试", "ts_code": "000001.SZ", "score": 0, "macd": 0, "kdj_j": 0,
+        "name": "测试", "industry": "银行", "ts_code": "000001.SZ", "score": 0, "macd": 0, "kdj_j": 0,
         "rsi14": 0, "boll_position": 0, "nine_turn": 4, "bbi": None, "bias": None,
         "vr": None, "psy": None, "dmi": None, "volume_ratio": None,
         "turnover_rate": None, "amount": 100, "total_mv": None, "pe": None, "pb": None,
@@ -65,6 +65,7 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     }
     html = template.render(dashboard={"run": None, "dates": [], "sector_dates": [], "sectors": [], "signals": [signal], "filters": {}, "system_errors": []})
     assert "000001.SZ" in html
+    assert ">银行</td>" in html
     assert "—" in html
     assert ">4</td>" in html
     assert 'id="signal-table"' in html
@@ -90,6 +91,7 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
         assert f'name="min_{field}"' in filter_section
     headers = html.split('<table id="signal-table">', 1)[1].split("</thead>", 1)[0]
     assert headers.index("评分") < headers.index("九转") < headers.index("涨跌幅")
+    assert headers.index("股票") < headers.index("行业") < headers.index("评分")
     assert headers.index("净流入") < headers.index("PE<br><small>TTM</small>") < headers.index("MACD")
     assert headers.index("BBI") < headers.index("BIAS") < headers.index("VR") < headers.index("PSY") < headers.index("DMI")
 
@@ -381,7 +383,7 @@ def test_tushare_quote_main_flow_uses_big_plus_extra_orders_and_dynamic_pe_ttm()
             }])
 
         def stock_basic(self, **_):
-            return pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"]})
+            return pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "industry": ["银行"]})
 
         def daily_basic(self, **kwargs):
             self.daily_basic_fields = kwargs["fields"]
@@ -392,6 +394,7 @@ def test_tushare_quote_main_flow_uses_big_plus_extra_orders_and_dynamic_pe_ttm()
         rows = fetch_quotes("20260814")
 
     assert rows[0]["main_net_inflow"] == 370_000
+    assert rows[0]["industry"] == "银行"
     assert rows[0]["pe"] == 12.5
     assert "pe_ttm" in pro.daily_basic_fields
     assert ",pe," not in pro.daily_basic_fields
