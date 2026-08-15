@@ -90,6 +90,7 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
         assert f'name="min_{field}"' in filter_section
     headers = html.split('<table id="signal-table">', 1)[1].split("</thead>", 1)[0]
     assert headers.index("评分") < headers.index("九转") < headers.index("涨跌幅")
+    assert headers.index("净流入") < headers.index("PE<br><small>TTM</small>") < headers.index("MACD")
     assert headers.index("BBI") < headers.index("BIAS") < headers.index("VR") < headers.index("PSY") < headers.index("DMI")
 
 
@@ -366,7 +367,7 @@ def test_sector_sources_do_not_include_tushare_industry_flow_endpoints():
     assert "moneyflow_ind_dc" not in __import__("app.providers", fromlist=["*"]).__dict__
 
 
-def test_tushare_quote_main_flow_uses_big_plus_extra_orders_and_converts_wan_to_yuan():
+def test_tushare_quote_main_flow_uses_big_plus_extra_orders_and_dynamic_pe_ttm():
     import pandas as pd
 
     class Pro:
@@ -382,13 +383,18 @@ def test_tushare_quote_main_flow_uses_big_plus_extra_orders_and_converts_wan_to_
         def stock_basic(self, **_):
             return pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"]})
 
-        def daily_basic(self, **_):
-            return pd.DataFrame()
+        def daily_basic(self, **kwargs):
+            self.daily_basic_fields = kwargs["fields"]
+            return pd.DataFrame([{"ts_code": "000001.SZ", "turnover_rate": 1, "volume_ratio": 2, "pe": 9, "pe_ttm": 12.5, "pb": 1, "total_mv": 3}])
 
-    with patch("app.providers._ts", return_value=Pro()):
+    pro = Pro()
+    with patch("app.providers._ts", return_value=pro):
         rows = fetch_quotes("20260814")
 
     assert rows[0]["main_net_inflow"] == 370_000
+    assert rows[0]["pe"] == 12.5
+    assert "pe_ttm" in pro.daily_basic_fields
+    assert ",pe," not in pro.daily_basic_fields
 
 
 def test_eastmoney_history_uses_board_codes_and_raw_json_not_akshare_name_lookup():

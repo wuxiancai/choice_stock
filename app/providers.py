@@ -132,7 +132,7 @@ def fetch_quotes(
             try:
                 basics = pro.daily_basic(
                     trade_date=trade_date,
-                    fields="ts_code,turnover_rate,volume_ratio,pe,pb,total_mv",
+                    fields="ts_code,turnover_rate,volume_ratio,pe_ttm,pb,total_mv",
                 )
                 basic_map = {r.ts_code: r for r in basics.itertuples()}
             except Exception:
@@ -151,7 +151,9 @@ def fetch_quotes(
             "turnover_rate": number(basic_map.get(r.ts_code), "turnover_rate"),
             "volume_ratio": number(basic_map.get(r.ts_code), "volume_ratio"),
             "total_mv": number(basic_map.get(r.ts_code), "total_mv"),
-            "pe": number(basic_map.get(r.ts_code), "pe"),
+            # The dashboard's persisted ``pe`` column is explicitly dynamic PE
+            # (TTM), not Tushare's static ``pe`` field.
+            "pe": number(basic_map.get(r.ts_code), "pe_ttm"),
             "pb": number(basic_map.get(r.ts_code), "pb"),
         } for r in frame.itertuples()]
     except ProviderError:
