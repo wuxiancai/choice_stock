@@ -12,6 +12,7 @@ from .providers import MIN_VALID_SECTOR_ROWS, ProviderError, fetch_quotes, fetch
 
 FILTER_METRICS = (
     "nine_turn", "main_net_inflow", "volume_ratio", "turnover_rate", "amount", "pe", "pb",
+    "bbi", "bias", "vr", "psy", "dmi",
 )
 
 # A-share daily data contains thousands of listed securities.  A much smaller
@@ -226,7 +227,10 @@ def calculate_signals(trade_date: str) -> None:
             rows = conn.execute("SELECT * FROM daily_quotes WHERE ts_code=? ORDER BY trade_date DESC LIMIT 40", (code,)).fetchall()[::-1]
             if len(rows) < 26 or rows[-1]["trade_date"] != trade_date:
                 continue
-            v = calculate([r["close"] for r in rows], [r["high"] for r in rows], [r["low"] for r in rows])
+            v = calculate(
+                [r["close"] for r in rows], [r["high"] for r in rows], [r["low"] for r in rows],
+                [r["vol"] for r in rows],
+            )
             score, reasons = 0, []
             for key, threshold, label in (("macd", 0, "MACD 金叉区间"), ("kdj_j", 50, "KDJ 偏强"), ("rsi14", 50, "RSI 强势")):
                 if v[key] > threshold:
@@ -237,10 +241,11 @@ def calculate_signals(trade_date: str) -> None:
                 score += 25; reasons.append("主力资金净流入")
             latest = rows[-1]
             conn.execute("""INSERT OR REPLACE INTO stock_signals
-                (trade_date,ts_code,name,score,macd,kdj_j,rsi14,boll_position,nine_turn,main_net_inflow,volume_ratio,turnover_rate,amount,total_mv,pe,pb,pct_chg,reasons,source)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                (trade_date,ts_code,name,score,macd,kdj_j,rsi14,boll_position,nine_turn,bbi,bias,vr,psy,dmi,main_net_inflow,volume_ratio,turnover_rate,amount,total_mv,pe,pb,pct_chg,reasons,source)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                 trade_date, code, latest["name"], score, v["macd"], v["kdj_j"], v["rsi14"],
-                v["boll_position"], v["nine_turn"], latest["main_net_inflow"], latest["volume_ratio"],
+                v["boll_position"], v["nine_turn"], v["bbi"], v["bias"], v["vr"], v["psy"], v["dmi"],
+                latest["main_net_inflow"], latest["volume_ratio"],
                 latest["turnover_rate"], latest["amount"], latest["total_mv"], latest["pe"], latest["pb"],
                 latest["pct_chg"], json.dumps(reasons, ensure_ascii=False), "tushare",
             ))

@@ -9,11 +9,12 @@ import os
 
 
 def test_calculate_returns_all_requested_technical_metrics():
-    closes = [10 + i * 0.1 for i in range(35)]
-    metrics = calculate(closes, [x + 0.2 for x in closes], [x - 0.2 for x in closes])
-    assert {"macd", "kdj_j", "rsi14", "boll_position", "nine_turn"} <= metrics.keys()
+    closes = [10 + i * 0.1 + (0.3 if i % 2 else 0) for i in range(40)]
+    metrics = calculate(closes, [x + 0.2 for x in closes], [x - 0.2 for x in closes], [1000 + i * 10 for i in range(40)])
+    assert {"macd", "kdj_j", "rsi14", "boll_position", "nine_turn", "bbi", "bias", "vr", "psy", "dmi"} <= metrics.keys()
     assert metrics["macd"] > 0
     assert 0 <= metrics["rsi14"] <= 100
+    assert all(metrics[key] is not None for key in ("bbi", "bias", "vr", "psy", "dmi"))
 
 
 def test_calculate_marks_a_completed_downward_nine_turn_as_negative():
@@ -36,8 +37,8 @@ def test_standard_display_time_formats_date_and_shanghai_time():
 
 
 def test_signal_filters_accept_supported_metrics_and_ignore_removed_metrics():
-    filters = normalize_signal_filters({"stock_code": " 000001.sz ", "min_volume_ratio": "1.2", "max_pb": "5", "min_score": "50", "max_total_mv": "1000", "min_macd": "0", "min_pct_chg": "2"})
-    assert filters == {"stock_code": "000001.SZ", "min_volume_ratio": 1.2, "max_pb": 5.0}
+    filters = normalize_signal_filters({"stock_code": " 000001.sz ", "min_volume_ratio": "1.2", "max_pb": "5", "min_bbi": "10", "max_dmi": "30", "min_score": "50", "max_total_mv": "1000", "min_macd": "0", "min_pct_chg": "2"})
+    assert filters == {"stock_code": "000001.SZ", "min_volume_ratio": 1.2, "max_pb": 5.0, "min_bbi": 10.0, "max_dmi": 30.0}
 
 
 def test_sector_source_summary_distinguishes_failed_and_unattempted_sources():
@@ -57,7 +58,8 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     template = environment.get_template("index.html")
     signal = {
         "name": "测试", "ts_code": "000001.SZ", "score": 0, "macd": 0, "kdj_j": 0,
-        "rsi14": 0, "boll_position": 0, "nine_turn": 4, "volume_ratio": None,
+        "rsi14": 0, "boll_position": 0, "nine_turn": 4, "bbi": None, "bias": None,
+        "vr": None, "psy": None, "dmi": None, "volume_ratio": None,
         "turnover_rate": None, "amount": 100, "total_mv": None, "pe": None, "pb": None,
         "pct_chg": None, "main_net_inflow": None, "reasons": "[]",
     }
@@ -82,8 +84,11 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
         assert f'name="min_{field}"' not in filter_section
     for field in ("score", "total_mv"):
         assert f'name="min_{field}"' not in filter_section
+    for field in ("bbi", "bias", "vr", "psy", "dmi"):
+        assert f'name="min_{field}"' in filter_section
     headers = html.split('<table id="signal-table">', 1)[1].split("</thead>", 1)[0]
     assert headers.index("评分") < headers.index("九转") < headers.index("涨跌幅")
+    assert headers.index("BBI") < headers.index("BIAS") < headers.index("VR") < headers.index("PSY") < headers.index("DMI")
 
 
 def test_dashboard_filters_signals_by_stock_code_prefix(tmp_path):

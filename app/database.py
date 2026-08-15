@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS sector_snapshots (
 CREATE TABLE IF NOT EXISTS stock_signals (
   trade_date TEXT NOT NULL, ts_code TEXT NOT NULL, name TEXT, score REAL NOT NULL,
   macd REAL, kdj_j REAL, rsi14 REAL, boll_position REAL, nine_turn INTEGER,
+  bbi REAL, bias REAL, vr REAL, psy REAL, dmi REAL,
   main_net_inflow REAL, volume_ratio REAL, turnover_rate REAL, amount REAL,
   total_mv REAL, pe REAL, pb REAL, pct_chg REAL,
   reasons TEXT NOT NULL, source TEXT NOT NULL, PRIMARY KEY(trade_date, ts_code)
@@ -53,6 +54,7 @@ def initialize() -> None:
         for column, definition in {
             "main_net_inflow": "REAL", "volume_ratio": "REAL", "turnover_rate": "REAL",
             "amount": "REAL", "total_mv": "REAL", "pe": "REAL", "pb": "REAL", "pct_chg": "REAL",
+            "bbi": "REAL", "bias": "REAL", "vr": "REAL", "psy": "REAL", "dmi": "REAL",
         }.items():
             if column not in signal_columns:
                 conn.execute(f"ALTER TABLE stock_signals ADD COLUMN {column} {definition}")
