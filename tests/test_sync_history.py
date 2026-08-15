@@ -1,4 +1,4 @@
-from app.services import is_unavailable_daily_error, missing_trade_dates
+from app.services import incomplete_snapshot_dates, is_unavailable_daily_error, missing_trade_dates
 
 
 def test_first_sync_backfills_all_recent_ninety_open_days():
@@ -9,6 +9,11 @@ def test_first_sync_backfills_all_recent_ninety_open_days():
 def test_incremental_sync_only_fetches_missing_open_days():
     trade_dates = ["20260729", "20260730", "20260731"]
     assert missing_trade_dates(trade_dates, {"20260729", "20260731"}) == ["20260730"]
+
+
+def test_incremental_sync_repairs_incomplete_snapshots_but_skips_complete_days():
+    dates = ["20260729", "20260730", "20260731"]
+    assert incomplete_snapshot_dates(dates, {"20260729": 5_000, "20260730": 12, "20260731": 5_100}, 1_000) == ["20260730"]
 
 
 def test_sync_skips_open_dates_that_do_not_have_published_daily_quotes_yet():

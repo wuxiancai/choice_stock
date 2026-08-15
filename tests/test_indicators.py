@@ -36,7 +36,7 @@ def test_standard_display_time_formats_date_and_shanghai_time():
 
 
 def test_signal_filters_accept_supported_metrics_and_ignore_removed_metrics():
-    filters = normalize_signal_filters({"min_volume_ratio": "1.2", "max_pb": "5", "min_macd": "0", "min_pct_chg": "2"})
+    filters = normalize_signal_filters({"min_volume_ratio": "1.2", "max_pb": "5", "min_score": "50", "max_total_mv": "1000", "min_macd": "0", "min_pct_chg": "2"})
     assert filters == {"min_volume_ratio": 1.2, "max_pb": 5.0}
 
 
@@ -61,6 +61,10 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     filter_section = html.split('<div class="card"><h2>当日技术信号</h2>', 1)[0]
     for field in ("macd", "kdj_j", "rsi14", "boll_position", "pct_chg"):
         assert f'name="min_{field}"' not in filter_section
+    for field in ("score", "total_mv"):
+        assert f'name="min_{field}"' not in filter_section
+    headers = html.split('<table id="signal-table">', 1)[1].split("</thead>", 1)[0]
+    assert headers.index("评分") < headers.index("九转") < headers.index("涨跌幅")
 
 
 def test_dashboard_adds_daily_sector_ranks(tmp_path):
@@ -106,7 +110,7 @@ def test_dashboard_keeps_five_trade_date_headers_when_sector_history_is_incomple
             conn.execute("INSERT INTO sector_snapshots VALUES (?,?,?,?,?,?,?)", (dates[-1], "a", "行业A", 1, None, 1, "test"))
         result = dashboard()
         assert result["sector_dates"] == dates[::-1]
-        assert result["sector_snapshot_dates"] == [dates[-1]]
+        assert result["sector_snapshot_dates"] == []
         assert result["sectors"][0]["daily_ranks"] == {date: (1 if date == dates[-1] else None) for date in dates}
     finally:
         object.__setattr__(settings, "data_dir", original_data_dir)
@@ -173,6 +177,33 @@ def test_sync_backfills_the_previous_four_sector_trade_dates(tmp_path):
         with connect() as conn:
             persisted_dates = [row[0] for row in conn.execute("SELECT DISTINCT trade_date FROM sector_snapshots ORDER BY trade_date")]
         assert persisted_dates == dates[-5:]
+    finally:
+        object.__setattr__(settings, "data_dir", original_data_dir)
+
+
+def test_sync_repairs_partial_sector_history_dates(tmp_path):
+    original_data_dir = settings.data_dir
+    object.__setattr__(settings, "data_dir", tmp_path)
+    dates = [f"202601{i:02d}" for i in range(1, 91)]
+    latest_date, history_dates = dates[-1], dates[-5:-1]
+    latest_rows = [
+        {"trade_date": latest_date, "sector_code": f"s{index}", "sector_name": f"行业{index}", "pct_chg": 1.0, "amount": 100, "main_net_inflow": 100, "source": "ths"}
+        for index in range(30)
+    ]
+    history_rows = [
+        {"trade_date": trade_date, "sector_code": f"s{index}", "sector_name": f"行业{index}", "pct_chg": 1.0, "amount": 100, "main_net_inflow": 100, "source": "eastmoney_history"}
+        for trade_date in history_dates for index in range(30)
+    ]
+    try:
+        initialize()
+        with connect() as conn:
+            conn.execute("INSERT INTO sector_snapshots VALUES (?,?,?,?,?,?,?)", (history_dates[0], "s0", "行业0", 1.0, 100, 100, "old"))
+        with patch("app.services.recent_trade_dates", return_value=dates), \
+             patch("app.services.fetch_quotes", return_value=[]), \
+             patch("app.services.fetch_sectors", return_value=SectorFetchResult(latest_rows, "ths", [])), \
+             patch("app.services.fetch_sector_history", return_value=(history_rows, [])) as history_fetch:
+            sync_latest()
+        history_fetch.assert_called_once_with(history_dates, [f"行业{index}" for index in range(30)])
     finally:
         object.__setattr__(settings, "data_dir", original_data_dir)
 

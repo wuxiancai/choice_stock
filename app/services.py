@@ -11,9 +11,13 @@ from .providers import MIN_VALID_SECTOR_ROWS, ProviderError, fetch_quotes, fetch
 
 
 FILTER_METRICS = (
-    "score", "nine_turn", "main_net_inflow", "volume_ratio", "turnover_rate", "amount",
-    "total_mv", "pe", "pb",
+    "nine_turn", "main_net_inflow", "volume_ratio", "turnover_rate", "amount", "pe", "pb",
 )
+
+# A-share daily data contains thousands of listed securities.  A much smaller
+# count is a partially written/failed batch and must be picked up by the next
+# incremental synchronization rather than treated as complete.
+MIN_VALID_DAILY_QUOTE_ROWS = 1_000
 
 
 def format_cny(value: float | int | None, multiplier: float = 1) -> str:
@@ -93,6 +97,13 @@ def missing_trade_dates(trade_dates: list[str], existing_dates: set[str]) -> lis
     return [trade_date for trade_date in trade_dates if trade_date not in existing_dates]
 
 
+def incomplete_snapshot_dates(
+    trade_dates: list[str], counts_by_date: dict[str, int], minimum_rows: int,
+) -> list[str]:
+    """Return dates without a complete persisted snapshot."""
+    return [trade_date for trade_date in trade_dates if counts_by_date.get(trade_date, 0) < minimum_rows]
+
+
 def is_unavailable_daily_error(error: Exception) -> bool:
     return "无日线数据" in str(error)
 
@@ -105,11 +116,11 @@ def sync_latest() -> dict:
         # 日历可能先于日线发布。多取候选日，以确保最后至少能获得 90 个实际可用交易日。
         trade_dates = recent_trade_dates(120)
         with connect() as conn:
-            existing_dates = {row[0] for row in conn.execute(
-                "SELECT DISTINCT trade_date FROM daily_quotes WHERE trade_date IN (%s)" % ",".join("?" * len(trade_dates)),
+            quote_counts = dict(conn.execute(
+                "SELECT trade_date, COUNT(*) FROM daily_quotes WHERE trade_date IN (%s) GROUP BY trade_date" % ",".join("?" * len(trade_dates)),
                 trade_dates,
-            )}
-        dates_to_fetch = missing_trade_dates(trade_dates, existing_dates)
+            ))
+        dates_to_fetch = incomplete_snapshot_dates(trade_dates, quote_counts, MIN_VALID_DAILY_QUOTE_ROWS)
         quotes = []
         unavailable_dates = set()
         for sync_date in dates_to_fetch:
@@ -129,19 +140,19 @@ def sync_latest() -> dict:
         sectors, sector_errors, sector_source = [], [], ""
         sector_trade_dates = available_dates[-5:]
         with connect() as conn:
-            existing_sector_dates = {
-                row[0] for row in conn.execute(
-                    "SELECT DISTINCT trade_date FROM sector_snapshots WHERE trade_date IN (%s)" % ",".join("?" * len(sector_trade_dates)),
+            sector_counts = dict(conn.execute(
+                "SELECT trade_date, COUNT(*) FROM sector_snapshots WHERE trade_date IN (%s) GROUP BY trade_date" % ",".join("?" * len(sector_trade_dates)),
                     sector_trade_dates,
-                )
-            }
+            ))
         try:
             sector_result = fetch_sectors(trade_date)
             sectors, sector_source = sector_result.rows, sector_result.source
             # A fallback that returned a complete data set is successful. Keep the
             # selected source in sync_runs.source, but do not surface failed probes
             # as a user-facing error.
-            missing_history_dates = [date for date in sector_trade_dates[:-1] if date not in existing_sector_dates]
+            missing_history_dates = incomplete_snapshot_dates(
+                sector_trade_dates[:-1], sector_counts, MIN_VALID_SECTOR_ROWS,
+            )
             if missing_history_dates:
                 history_rows, history_failures = fetch_sector_history(
                     missing_history_dates, [row["sector_name"] for row in sectors],
@@ -221,8 +232,8 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
             dates = [r[0] for r in conn.execute("SELECT DISTINCT trade_date FROM sector_snapshots ORDER BY trade_date DESC LIMIT 5")][::-1]
         sector_rows = conn.execute("SELECT * FROM sector_snapshots WHERE trade_date IN (%s) ORDER BY trade_date DESC,pct_chg DESC" % ",".join("?" * len(dates)), dates).fetchall() if dates else []
         sector_snapshot_dates = [r[0] for r in conn.execute(
-            "SELECT DISTINCT trade_date FROM sector_snapshots WHERE trade_date IN (%s) ORDER BY trade_date" % ",".join("?" * len(dates)),
-            dates,
+            "SELECT trade_date FROM sector_snapshots WHERE trade_date IN (%s) GROUP BY trade_date HAVING COUNT(*) >= ? ORDER BY trade_date" % ",".join("?" * len(dates)),
+            [*dates, MIN_VALID_SECTOR_ROWS],
         )] if dates else []
         if signal_date:
             conditions, params = ["trade_date=?"], [signal_date]
