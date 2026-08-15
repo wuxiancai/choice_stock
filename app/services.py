@@ -111,7 +111,7 @@ def is_unavailable_daily_error(error: Exception) -> bool:
 def sector_source_summary(selected_source: str, fallback_errors: list[str]) -> str:
     """Make source selection observable without exposing raw URLs or secrets."""
     labels = {
-        "eastmoney": "东方财富", "ths": "同花顺", "tencent": "腾讯",
+        "tushare_moneyflow": "Tushare 个股资金流行业聚合", "eastmoney": "东方财富", "ths": "同花顺", "tencent": "腾讯",
     }
     attempted = []
     for failure in fallback_errors:
@@ -163,6 +163,7 @@ def sync_latest() -> dict:
         # 最新日额外获取主力资金，覆盖前面的纯历史日线记录。
         quotes.extend(fetch_quotes(trade_date, include_moneyflow=True))
         sectors, sector_errors, sector_source = [], [], ""
+        current_sector_rows = []
         sector_trade_dates = available_dates[-5:]
         with connect() as conn:
             sector_counts = dict(conn.execute(
@@ -172,6 +173,7 @@ def sync_latest() -> dict:
         try:
             sector_result = fetch_sectors(trade_date)
             sectors, sector_source = sector_result.rows, sector_result.source
+            current_sector_rows = [row for row in sectors if row["trade_date"] == trade_date]
             sector_errors.append(sector_source_summary(sector_source, sector_result.fallback_errors))
             # A fallback that returned a complete data set is successful. Keep the
             # selected source in sync_runs.source, but do not surface failed probes
@@ -189,6 +191,10 @@ def sync_latest() -> dict:
             sector_errors.append(str(exc))
             record_system_error("sync_latest.sectors", exc)
         with connect() as conn:
+            if current_sector_rows:
+                # A new current snapshot replaces any older fallback taxonomy for
+                # this date, so five-day matrix rows remain comparable by industry.
+                conn.execute("DELETE FROM sector_snapshots WHERE trade_date=?", (trade_date,))
             conn.executemany("""INSERT OR REPLACE INTO daily_quotes (trade_date,ts_code,name,open,high,low,close,pct_chg,vol,amount,turnover_rate,volume_ratio,total_mv,pe,pb,source,main_net_inflow) VALUES (:trade_date,:ts_code,:name,:open,:high,:low,:close,:pct_chg,:vol,:amount,:turnover_rate,:volume_ratio,:total_mv,:pe,:pb,'tushare',:main_net_inflow)""", quotes)
             conn.executemany("""INSERT OR REPLACE INTO sector_snapshots (trade_date,sector_code,sector_name,pct_chg,amount,main_net_inflow,source) VALUES (:trade_date,:sector_code,:sector_name,:pct_chg,:amount,:main_net_inflow,:source)""", sectors)
             completed_sector_dates = {

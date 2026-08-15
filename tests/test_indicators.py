@@ -1,5 +1,5 @@
 from app.indicators import calculate
-from app.providers import ProviderError, SectorFetchResult, fetch_sectors
+from app.providers import ProviderError, SectorFetchResult, fetch_sector_history, fetch_sectors, fetch_tushare_sector_history
 from app.services import dashboard, format_cny, format_datetime, format_trade_date, normalize_signal_filters, recent_system_errors, record_system_error, sector_source_summary, sync_latest
 from app.config import settings
 from app.database import connect, initialize
@@ -44,8 +44,9 @@ def test_sector_source_summary_distinguishes_failed_and_unattempted_sources():
     summary = sector_source_summary("ths", ["eastmoney: ProxyError: disconnected"])
     assert "当日行业数据：同花顺 成功" in summary
     assert "东方财富：失败（网络/代理失败）" in summary
-    assert "未尝试：腾讯（前序来源已成功）" in summary
-    assert "Tushare" not in summary
+    assert "未尝试：Tushare 个股资金流行业聚合、腾讯（前序来源已成功）" in summary
+    assert "Tushare 同花顺" not in summary
+    assert "Tushare 东方财富" not in summary
 
 
 def test_dashboard_template_renders_historical_signal_with_new_nullable_fields():
@@ -234,6 +235,7 @@ def test_sector_fetch_retries_once_without_proxy_after_proxy_error():
         return EmptyFrame()
 
     with patch.dict(os.environ, {"HTTP_PROXY": "http://proxy", "HTTPS_PROXY": "http://proxy", "ALL_PROXY": "http://proxy"}, clear=False), \
+         patch("app.providers._fetch_tushare_sector_rows", side_effect=ProviderError("unavailable")), \
          patch("app.providers._fetch_sector_frame", side_effect=fetch_frame):
         result = fetch_sectors("20260101")
         assert result.source == "eastmoney"
@@ -244,7 +246,8 @@ def test_sector_fetch_retries_once_without_proxy_after_proxy_error():
 
 
 def test_sector_fetch_preserves_proxy_and_direct_failures():
-    with patch("app.providers._fetch_sector_frame", side_effect=[RuntimeError("ProxyError: proxy down"), RuntimeError("direct DNS failure")]), \
+    with patch("app.providers._fetch_tushare_sector_rows", side_effect=ProviderError("unavailable")), \
+         patch("app.providers._fetch_sector_frame", side_effect=[RuntimeError("ProxyError: proxy down"), RuntimeError("direct DNS failure")]), \
          patch("app.providers._fetch_ths_sector_frame", side_effect=RuntimeError("ths unavailable")), \
          patch("app.providers._fetch_tencent_sector_rows", side_effect=RuntimeError("tencent unavailable")):
         try:
@@ -267,7 +270,8 @@ def test_sector_fetch_uses_independent_ths_backup_when_higher_priority_sources_f
                 for index in range(30)
             ]
 
-    with patch("app.providers._fetch_eastmoney_sector_frame_with_retry", side_effect=RuntimeError("空响应")), \
+    with patch("app.providers._fetch_tushare_sector_rows", side_effect=ProviderError("unavailable")), \
+         patch("app.providers._fetch_eastmoney_sector_frame_with_retry", side_effect=RuntimeError("空响应")), \
          patch("app.providers._fetch_ths_sector_frame", return_value=ThsFrame()):
         result = fetch_sectors("20260101")
 
@@ -278,7 +282,7 @@ def test_sector_fetch_uses_independent_ths_backup_when_higher_priority_sources_f
         "pct_chg": 2.5, "amount": 125000000.0, "main_net_inflow": 125000000.0, "source": "ths",
     }
     assert len(result.rows) == 30
-    assert len(result.fallback_errors) == 1
+    assert len(result.fallback_errors) == 2
 
 
 def test_sector_fetch_uses_tencent_when_all_prior_sources_fail():
@@ -287,16 +291,56 @@ def test_sector_fetch_uses_tencent_when_all_prior_sources_fail():
          "pct_chg": 1.0, "amount": 100, "main_net_inflow": 100, "source": "tencent"}
         for index in range(30)
     ]
-    with patch("app.providers._fetch_eastmoney_sector_frame_with_retry", side_effect=RuntimeError("bad response")), \
+    with patch("app.providers._fetch_tushare_sector_rows", side_effect=ProviderError("unavailable")), \
+         patch("app.providers._fetch_eastmoney_sector_frame_with_retry", side_effect=RuntimeError("bad response")), \
          patch("app.providers._fetch_ths_sector_frame", side_effect=RuntimeError("no tables")), \
          patch("app.providers._fetch_tencent_sector_rows", return_value=tencent_rows):
         result = fetch_sectors("20260101")
     assert result.source == "tencent"
     assert result.rows == tencent_rows
-    assert len(result.fallback_errors) == 2
+    assert len(result.fallback_errors) == 3
 
 
 def test_sector_sources_do_not_include_tushare_industry_flow_endpoints():
     """A 3,000-point account must never probe the higher-tier industry APIs."""
     assert "moneyflow_ind_ths" not in __import__("app.providers", fromlist=["*"]).__dict__
     assert "moneyflow_ind_dc" not in __import__("app.providers", fromlist=["*"]).__dict__
+
+
+def test_eastmoney_history_uses_board_codes_and_raw_json_not_akshare_name_lookup():
+    payloads = iter([
+        {"rc": 0, "data": {"diff": [{"f12": "BK0001", "f14": "测试行业", "f3": 1, "f62": 2} for _ in range(30)]}},
+        {"rc": 0, "data": {"klines": ["2026-08-10,100,0,0,0,0,0,0,0", "2026-08-11,200,0,0,0,0,0,0,0"]}},
+        {"rc": 0, "data": {"klines": ["2026-08-10,0,0,0,0,0,0,0,1.5", "2026-08-11,0,0,0,0,0,0,0,-2.5"]}},
+    ])
+    with patch("app.providers.fetch_tushare_sector_history", return_value=([], ["20260810", "20260811"], [])), \
+         patch("app.providers._eastmoney_json", side_effect=lambda *_: next(payloads)):
+        import app.providers as providers
+        providers._eastmoney_industry_codes.cache_clear()
+        rows, diagnostics = fetch_sector_history(["20260810", "20260811"], ["测试行业"])
+    assert rows == [
+        {"trade_date": "20260810", "sector_code": "BK0001", "sector_name": "测试行业", "pct_chg": 1.5, "amount": 100.0, "main_net_inflow": 100.0, "source": "eastmoney_history"},
+        {"trade_date": "20260811", "sector_code": "BK0001", "sector_name": "测试行业", "pct_chg": -2.5, "amount": 200.0, "main_net_inflow": 200.0, "source": "eastmoney_history"},
+    ]
+    assert "成功 1/1 个行业" in diagnostics[0]
+
+
+def test_tushare_individual_moneyflow_aggregates_real_industry_history():
+    import pandas as pd
+
+    class Pro:
+        def stock_basic(self, **_):
+            return pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"], "industry": ["银行", "银行"]})
+
+        def moneyflow(self, **_):
+            return pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"], "buy_elg_amount": [10, 5], "sell_elg_amount": [3, 7]})
+
+        def daily(self, **_):
+            return pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"], "pct_chg": [1.0, -1.0], "amount": [100, 300]})
+
+    with patch("app.providers._ts", return_value=Pro()), patch("app.providers.MIN_VALID_SECTOR_ROWS", 1):
+        rows, unresolved, diagnostics = fetch_tushare_sector_history(["20260810"])
+
+    assert unresolved == []
+    assert rows == [{"trade_date": "20260810", "sector_code": "银行", "sector_name": "银行", "pct_chg": -0.5, "amount": 5000.0, "main_net_inflow": 5000.0, "source": "tushare_moneyflow_aggregate"}]
+    assert "成功（1 个行业）" in diagnostics[0]
