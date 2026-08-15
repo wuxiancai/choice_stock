@@ -1,5 +1,5 @@
 from app.indicators import calculate
-from app.providers import ProviderError, SectorFetchResult, fetch_sector_history, fetch_sectors, fetch_tushare_sector_history
+from app.providers import ProviderError, SectorFetchResult, fetch_quotes, fetch_sector_history, fetch_sectors, fetch_tushare_sector_history
 from app.services import dashboard, format_cny, format_datetime, format_trade_date, normalize_signal_filters, recent_system_errors, record_system_error, sector_source_summary, sync_latest
 from app.config import settings
 from app.database import connect, initialize
@@ -66,6 +66,7 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     assert "—" in html
     assert ">4</td>" in html
     assert 'id="signal-table"' in html
+    assert "大单+特大单" in html
     assert 'data-sort-type="number"' in html
     filter_section = html.split('<div class="card"><h2>当日技术信号</h2>', 1)[0]
     for field in ("macd", "kdj_j", "rsi14", "boll_position", "pct_chg"):
@@ -307,6 +308,31 @@ def test_sector_sources_do_not_include_tushare_industry_flow_endpoints():
     assert "moneyflow_ind_dc" not in __import__("app.providers", fromlist=["*"]).__dict__
 
 
+def test_tushare_quote_main_flow_uses_big_plus_extra_orders_and_converts_wan_to_yuan():
+    import pandas as pd
+
+    class Pro:
+        def daily(self, **_):
+            return pd.DataFrame([{"ts_code": "000001.SZ", "open": 1, "high": 1, "low": 1, "close": 1, "pct_chg": 0, "vol": 1, "amount": 1}])
+
+        def moneyflow(self, **_):
+            return pd.DataFrame([{
+                "ts_code": "000001.SZ", "buy_lg_amount": 20, "sell_lg_amount": 5,
+                "buy_elg_amount": 30, "sell_elg_amount": 8,
+            }])
+
+        def stock_basic(self, **_):
+            return pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"]})
+
+        def daily_basic(self, **_):
+            return pd.DataFrame()
+
+    with patch("app.providers._ts", return_value=Pro()):
+        rows = fetch_quotes("20260814")
+
+    assert rows[0]["main_net_inflow"] == 370_000
+
+
 def test_eastmoney_history_uses_board_codes_and_raw_json_not_akshare_name_lookup():
     payloads = iter([
         {"rc": 0, "data": {"diff": [{"f12": "BK0001", "f14": "测试行业", "f3": 1, "f62": 2} for _ in range(30)]}},
@@ -333,7 +359,11 @@ def test_tushare_individual_moneyflow_aggregates_real_industry_history():
             return pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"], "industry": ["银行", "银行"]})
 
         def moneyflow(self, **_):
-            return pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"], "buy_elg_amount": [10, 5], "sell_elg_amount": [3, 7]})
+            return pd.DataFrame({
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "buy_lg_amount": [2, 3], "sell_lg_amount": [1, 1],
+                "buy_elg_amount": [10, 5], "sell_elg_amount": [3, 7],
+            })
 
         def daily(self, **_):
             return pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"], "pct_chg": [1.0, -1.0], "amount": [100, 300]})
@@ -342,5 +372,5 @@ def test_tushare_individual_moneyflow_aggregates_real_industry_history():
         rows, unresolved, diagnostics = fetch_tushare_sector_history(["20260810"])
 
     assert unresolved == []
-    assert rows == [{"trade_date": "20260810", "sector_code": "银行", "sector_name": "银行", "pct_chg": -0.5, "amount": 5000.0, "main_net_inflow": 5000.0, "source": "tushare_moneyflow_aggregate"}]
+    assert rows == [{"trade_date": "20260810", "sector_code": "银行", "sector_name": "银行", "pct_chg": -0.5, "amount": 80_000.0, "main_net_inflow": 80_000.0, "source": "tushare_moneyflow_aggregate"}]
     assert "成功（1 个行业）" in diagnostics[0]

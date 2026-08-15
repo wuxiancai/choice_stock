@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+from math import isfinite
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -37,6 +38,27 @@ _EASTMONEY_HEADERS = {
 _EASTMONEY_INDUSTRY_RANK_URL = "https://push2.eastmoney.com/api/qt/clist/get"
 _EASTMONEY_FLOW_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
 _EASTMONEY_PRICE_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+
+
+def tushare_main_net_inflow(row) -> float:
+    """Return the conventional main-force net inflow in yuan.
+
+    Tushare's ``moneyflow`` order-value fields are expressed in 万元.  The
+    dashboard's "主力" definition is 大单 + 特大单, rather than only 特大单 or
+    Tushare's separate all-order ``net_mf_amount`` field.
+    """
+    def amount(field: str) -> float:
+        value = getattr(row, field, None)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return numeric if isfinite(numeric) else 0.0
+
+    return (
+        amount("buy_lg_amount") - amount("sell_lg_amount")
+        + amount("buy_elg_amount") - amount("sell_elg_amount")
+    ) * 10_000
 
 
 @contextmanager
@@ -95,7 +117,9 @@ def fetch_quotes(
             raise ProviderError(f"{trade_date} 无日线数据（可能尚未收盘或无权限）")
         try:
             money = pro.moneyflow(trade_date=trade_date) if include_moneyflow else None
-            flow_map = {} if money is None else {r.ts_code: float((r.buy_elg_amount or 0) - (r.sell_elg_amount or 0)) * 1000 for r in money.itertuples()}
+            flow_map = {} if money is None else {
+                row.ts_code: tushare_main_net_inflow(row) for row in money.itertuples()
+            }
         except Exception:
             # Tushare 权限不足时不臆造个股主力资金，保留为 0 并由运行记录可见。
             flow_map = {}
@@ -384,7 +408,7 @@ def fetch_tushare_sector_history(trade_dates: list[str]) -> tuple[list[dict], li
                 quote = quote_by_code.get(item.ts_code)
                 if not industry or quote is None:
                     continue
-                net_inflow = float((item.buy_elg_amount or 0) - (item.sell_elg_amount or 0)) * 1000
+                net_inflow = tushare_main_net_inflow(item)
                 pct_chg, amount = quote
                 aggregate = grouped.setdefault(str(industry), {"net_inflow": 0, "weighted_change": 0, "weight": 0})
                 weight = amount if amount > 0 else 1
