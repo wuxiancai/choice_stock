@@ -70,6 +70,7 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     assert 'id="signal-table"' in html
     assert 'id="sync-button"' in html
     assert "数据研究用途，不构成投资建议。每日 21:00（上海时区）自动分析。" not in html
+    assert "A股盘后选股" not in html
     assert 'id="sector-table-wrap"' in html
     assert "event.preventDefault()" in html
     assert "'#' ~ row.daily_ranks" not in html
