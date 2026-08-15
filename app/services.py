@@ -282,7 +282,7 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
                 conditions.append(f"{metric} {'>=' if bound == 'min' else '<='} ?")
                 params.append(value)
             signals = conn.execute(
-                "SELECT * FROM stock_signals WHERE " + " AND ".join(conditions) + " ORDER BY score DESC LIMIT 300",
+                "SELECT * FROM stock_signals WHERE " + " AND ".join(conditions) + " ORDER BY main_net_inflow IS NULL, main_net_inflow DESC, score DESC LIMIT 300",
                 params,
             ).fetchall()
         else:

@@ -114,6 +114,27 @@ def test_dashboard_filters_signals_by_stock_code_prefix(tmp_path):
         object.__setattr__(settings, "data_dir", original_data_dir)
 
 
+def test_dashboard_sorts_signals_by_main_net_inflow_descending(tmp_path):
+    original_data_dir = settings.data_dir
+    object.__setattr__(settings, "data_dir", tmp_path)
+    try:
+        initialize()
+        with connect() as conn:
+            conn.execute("INSERT INTO sync_runs(started_at,trade_date,status) VALUES (?,?,?)", ("now", "20260813", "success"))
+            conn.executemany(
+                "INSERT INTO stock_signals(trade_date,ts_code,name,score,macd,kdj_j,rsi14,boll_position,nine_turn,main_net_inflow,reasons,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    ("20260813", "000001.SZ", "高流入", 10, 0, 0, 0, 0, 0, 300, "[]", "test"),
+                    ("20260813", "000002.SZ", "低流入", 90, 0, 0, 0, 0, 0, 100, "[]", "test"),
+                    ("20260813", "000003.SZ", "缺失", 100, 0, 0, 0, 0, 0, None, "[]", "test"),
+                ],
+            )
+        result = dashboard()
+        assert [row["name"] for row in result["signals"]] == ["高流入", "低流入", "缺失"]
+    finally:
+        object.__setattr__(settings, "data_dir", original_data_dir)
+
+
 def test_dashboard_adds_daily_sector_ranks(tmp_path):
     original_data_dir = settings.data_dir
     object.__setattr__(settings, "data_dir", tmp_path)
