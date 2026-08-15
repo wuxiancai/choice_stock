@@ -77,6 +77,7 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     assert "'#' ~ row.daily_ranks" not in html
     assert "repeat(8,minmax(0,1fr))" in html
     assert 'class="sortable nine-turn-header"' in html
+    assert 'class="nine-turn-filter"' in html
     assert ">净流入</th>" in html
     assert "主力净流入<br><small>大单+特大单</small>" not in html
     assert "主力净流入（大单+特大单，元）" not in html
@@ -92,7 +93,7 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     headers = html.split('<table id="signal-table">', 1)[1].split("</thead>", 1)[0]
     assert headers.index("评分") < headers.index("九转") < headers.index("涨跌幅")
     assert headers.index("股票") < headers.index("行业") < headers.index("评分")
-    assert headers.index("净流入") < headers.index("PE<br><small>TTM</small>") < headers.index("MACD")
+    assert headers.index("净流入") < headers.index("PE<br><small>TTM</small>") < headers.index("量比") < headers.index("换手率") < headers.index("MACD")
     assert headers.index("BBI") < headers.index("BIAS") < headers.index("VR") < headers.index("PSY") < headers.index("DMI")
 
 
@@ -112,6 +113,8 @@ def test_dashboard_filters_signals_by_stock_code_prefix(tmp_path):
             )
         result = dashboard({"stock_code": "000001"})
         assert result["filters"] == {"stock_code": "000001"}
+        assert [row["ts_code"] for row in result["signals"]] == ["000001.SZ"]
+        result = dashboard({"stock_code": "平安"})
         assert [row["ts_code"] for row in result["signals"]] == ["000001.SZ"]
     finally:
         object.__setattr__(settings, "data_dir", original_data_dir)

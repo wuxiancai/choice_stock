@@ -275,8 +275,8 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
             conditions, params = ["trade_date=?"], [signal_date]
             for key, value in filters.items():
                 if key == "stock_code":
-                    conditions.append("ts_code LIKE ?")
-                    params.append(f"{value}%")
+                    conditions.append("(ts_code LIKE ? OR name LIKE ?)")
+                    params.extend((f"{value}%", f"{value}%"))
                     continue
                 bound, metric = key.split("_", 1)
                 conditions.append(f"{metric} {'>=' if bound == 'min' else '<='} ?")
