@@ -29,7 +29,8 @@ MIN_VALID_SECTOR_ROWS = 30
 # is available to an account with 3,000 points or fewer.  Keep this declaration
 # next to the calls so a future provider addition cannot silently reintroduce a
 # higher-tier endpoint.
-TUSHARE_3000_POINT_APIS = frozenset({"trade_cal", "daily", "daily_basic", "moneyflow", "stock_basic"})
+TUSHARE_3000_POINT_APIS = frozenset({"trade_cal", "daily", "daily_basic", "moneyflow", "stock_basic", "index_member_all"})
+SW_L1_PAGE_SIZE = 3_000
 _EASTMONEY_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Referer": "https://data.eastmoney.com/bkzj/hy.html",
@@ -82,6 +83,34 @@ def _ts():
         raise ProviderError(f"Tushare 初始化失败：{exc}") from exc
 
 
+@lru_cache
+def sw_l1_industry_by_code() -> dict[str, str]:
+    """Return the current Shenwan 2021 level-1 industry for each A-share.
+
+    ``stock_basic.industry`` is a granular legacy classification (about 110
+    buckets), so it must not be used for the dashboard's level-1 industry view.
+    """
+    pro = _ts()
+    mapping: dict[str, str] = {}
+    offset = 0
+    try:
+        while True:
+            frame = pro.index_member_all(is_new="Y", offset=offset)
+            if frame.empty:
+                break
+            for row in frame.itertuples():
+                if row.ts_code and row.l1_name:
+                    mapping[str(row.ts_code)] = str(row.l1_name)
+            if len(frame) < SW_L1_PAGE_SIZE:
+                break
+            offset += len(frame)
+    except Exception as exc:
+        raise ProviderError(f"申万一级行业分类读取失败：{exc}") from exc
+    if not mapping:
+        raise ProviderError("申万一级行业分类未返回有效成分")
+    return mapping
+
+
 def recent_trade_dates(days: int = 90) -> list[str]:
     if days < 1:
         raise ValueError("交易日数量必须至少为 1")
@@ -124,9 +153,9 @@ def fetch_quotes(
             # Tushare 权限不足时不臆造个股主力资金，保留为 0 并由运行记录可见。
             flow_map = {}
         if name_map is None:
-            names = pro.stock_basic(exchange="", list_status="L", fields="ts_code,name,industry")
+            names = pro.stock_basic(exchange="", list_status="L", fields="ts_code,name")
             name_map = dict(zip(names.ts_code, names.name))
-            industry_map = dict(zip(names.ts_code, names.industry))
+            industry_map = sw_l1_industry_by_code()
         else:
             industry_map = {}
         if not include_basics:
@@ -221,7 +250,7 @@ def _fetch_ths_sector_frame():
 
 
 def _fetch_tencent_sector_rows(trade_date: str) -> list[dict]:
-    """Aggregate Tencent's live stock flow feed by Tushare's industry classification."""
+    """Aggregate Tencent's live stock flow feed by Shenwan level-1 industry."""
     import akshare as ak
 
     def fetch_frame():
@@ -235,11 +264,9 @@ def _fetch_tencent_sector_rows(trade_date: str) -> list[dict]:
         with without_http_proxy():
             frame = fetch_frame()
     try:
-        basics = _ts().stock_basic(exchange="", list_status="L", fields="ts_code,industry")
+        industry_by_code = sw_l1_industry_by_code()
     except Exception as exc:
         raise ProviderError(f"腾讯行情已返回，但行业分类读取失败：{exc}") from exc
-
-    industry_by_code = dict(zip(basics["ts_code"], basics["industry"]))
 
     def to_ts_code(code: str) -> str | None:
         raw = str(code).lower()
@@ -355,20 +382,16 @@ def _fetch_eastmoney_sector_frame_with_retry():
 
 
 def fetch_sectors(trade_date: str) -> SectorFetchResult:
-    """Use permitted Tushare per-stock aggregation before public live fallbacks."""
+    """Use only level-1-industry aggregations for the dashboard."""
     providers = (
         ("tushare_moneyflow", lambda: _fetch_tushare_sector_rows(trade_date)),
-        ("eastmoney", _fetch_eastmoney_sector_frame_with_retry),
-        ("ths", _fetch_ths_sector_frame),
         ("tencent", lambda: _fetch_tencent_sector_rows(trade_date)),
     )
     failures = []
     for source, fetch_frame in providers:
         try:
             rows = fetch_frame()
-            if source in {"tushare_moneyflow", "tencent"}:
-                return SectorFetchResult(rows, source, failures)
-            return SectorFetchResult(_normalize_sector_rows(rows, trade_date, source), source, failures)
+            return SectorFetchResult(rows, source, failures)
         except Exception as exc:
             failures.append(f"{source}: {exc}")
     def concise_failure(failure: str) -> str:
@@ -388,15 +411,14 @@ def fetch_sectors(trade_date: str) -> SectorFetchResult:
 
 
 def fetch_tushare_sector_history(trade_dates: list[str]) -> tuple[list[dict], list[str], list[str]]:
-    """Aggregate permitted Tushare per-stock flow into dated industry snapshots."""
+    """Aggregate permitted Tushare per-stock flow into Shenwan level-1 snapshots."""
     if not trade_dates:
         return [], [], []
     pro = _ts()
     try:
-        basics = pro.stock_basic(exchange="", list_status="L", fields="ts_code,industry")
-        industry_by_code = dict(zip(basics["ts_code"], basics["industry"]))
+        industry_by_code = sw_l1_industry_by_code()
     except Exception as exc:
-        return [], list(trade_dates), [f"Tushare 个股资金流行业聚合：行业分类读取失败（{exc}）"]
+        return [], list(trade_dates), [f"Tushare 申万一级行业聚合：行业分类读取失败（{exc}）"]
 
     rows, unresolved_dates, diagnostics = [], [], []
     for trade_date in trade_dates:
@@ -426,17 +448,17 @@ def fetch_tushare_sector_history(trade_dates: list[str]) -> tuple[list[dict], li
                     "trade_date": trade_date, "sector_code": industry, "sector_name": industry,
                     "pct_chg": values["weighted_change"] / values["weight"],
                     "amount": values["net_inflow"], "main_net_inflow": values["net_inflow"],
-                    "source": "tushare_moneyflow_aggregate",
+                    "source": "tushare_sw_l1_moneyflow_aggregate",
                 }
                 for industry, values in grouped.items() if values["weight"] > 0
             ]
             if len(date_rows) < MIN_VALID_SECTOR_ROWS:
                 raise ProviderError(f"仅聚合到 {len(date_rows)} 个有效行业")
             rows.extend(date_rows)
-            diagnostics.append(f"Tushare 个股资金流行业聚合：{trade_date} 成功（{len(date_rows)} 个行业）")
+            diagnostics.append(f"Tushare 申万一级行业聚合：{trade_date} 成功（{len(date_rows)} 个行业）")
         except Exception as exc:
             unresolved_dates.append(trade_date)
-            diagnostics.append(f"Tushare 个股资金流行业聚合：{trade_date} 失败（{str(exc)[:120]}）")
+            diagnostics.append(f"Tushare 申万一级行业聚合：{trade_date} 失败（{str(exc)[:120]}）")
     return rows, unresolved_dates, diagnostics
 
 
@@ -448,73 +470,16 @@ def _fetch_tushare_sector_rows(trade_date: str) -> list[dict]:
 
 
 def fetch_sector_history(trade_dates: list[str], sector_names: list[str]) -> tuple[list[dict], list[str]]:
-    """Retrieve dated industry snapshots using permitted Tushare data then Eastmoney.
+    """Retrieve only Shenwan level-1 historical snapshots.
 
-    The aggregation uses Tushare ``moneyflow`` (per-stock flow, 2,000-point tier),
-    not either restricted Tushare industry-flow API. THS and Tencent are live-only.
+    Eastmoney's public board history uses a different multi-level taxonomy, so it
+    is deliberately not mixed into this first-level view.
     """
     if not trade_dates or not sector_names:
         return [], []
     rows, unresolved_dates, diagnostics = fetch_tushare_sector_history(trade_dates)
-    if not unresolved_dates:
-        diagnostics.append("同花顺、腾讯：仅支持当日快照，历史回填未使用；Tushare 行业资金流接口超出 3000 积分权限，未调用")
-        return rows, diagnostics
-    wanted_dates = set(unresolved_dates)
-    start_date, end_date = min(unresolved_dates), max(unresolved_dates)
-
-    def normalize(symbol: str, sector_code: str, flow_rows: list[str], price_rows: list[str]) -> list[dict]:
-        flows = {
-            row.split(",")[0].replace("-", ""): _as_number(row.split(",")[1])
-            for row in flow_rows if len(row.split(",")) > 1
-        }
-        changes = {
-            row.split(",")[0].replace("-", ""): _as_number(row.split(",")[8])
-            for row in price_rows if len(row.split(",")) > 8
-        }
-        rows = []
-        for trade_date in sorted(wanted_dates):
-            net_inflow, pct_chg = flows.get(trade_date), changes.get(trade_date)
-            if net_inflow is None or pct_chg is None:
-                continue
-            rows.append({
-                "trade_date": trade_date, "sector_code": sector_code, "sector_name": symbol,
-                "pct_chg": pct_chg, "amount": net_inflow, "main_net_inflow": net_inflow,
-                "source": "eastmoney_history",
-            })
-        return rows
-
-    failures = []
-    names = sorted(set(sector_names))
-    codes = _eastmoney_industry_codes()
-    sectors = [(name, codes[name]) for name in names if name in codes]
-    failures = [f"{name}: 东方财富行业代码不存在" for name in names if name not in codes]
-    if not sectors:
-        diagnostics.append(f"东方财富行业历史：指定 {len(unresolved_dates)} 日，成功 0/{len(names)} 个行业，失败 {len(failures)} 个行业")
-        diagnostics.append("同花顺、腾讯：仅支持当日快照，历史回填未使用；Tushare 行业资金流超出 3000 积分权限，未调用")
-        return rows, diagnostics
-    first_sector, remaining_sectors = sectors[0], sectors[1:]
-    try:
-        rows.extend(normalize(first_sector[0], first_sector[1], *_fetch_eastmoney_sector_history(first_sector[1], start_date, end_date)))
-    except Exception as exc:
-        failures.append(f"{first_sector[0]}: {exc}")
-    # Keep public history requests deliberately low-concurrency after the code map warmup.
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {
-            executor.submit(lambda item: normalize(item[0], item[1], *_fetch_eastmoney_sector_history(item[1], start_date, end_date)), item): item
-            for item in remaining_sectors
-        }
-        for future in as_completed(futures):
-            name, _ = futures[future]
-            try:
-                rows.extend(future.result())
-            except Exception as exc:
-                failures.append(f"{name}: {exc}")
-    eastmoney_successes = len({row["sector_name"] for row in rows if row["trade_date"] in wanted_dates and row["source"] == "eastmoney_history"})
-    diagnostics.append(
-        f"东方财富行业历史：指定 {len(unresolved_dates)} 日，成功 {eastmoney_successes}/{len(names)} 个行业，失败 {len(failures)} 个行业"
-    )
-    diagnostics.append("同花顺、腾讯：仅支持当日快照，历史回填未使用；Tushare 行业资金流超出 3000 积分权限，未调用")
-    # Individual industry exceptions can contain long provider URLs and are not useful
-    # in the dashboard.  The per-source summary above is actionable and keeps the
-    # persistent run status readable.
+    if unresolved_dates:
+        diagnostics.append(f"申万一级历史回填：{len(unresolved_dates)} 个交易日未完成，未使用东方财富/同花顺/腾讯的非一级行业数据")
+    else:
+        diagnostics.append("同花顺、腾讯：仅支持当日快照，历史回填未使用；未混入东方财富非一级行业板块")
     return rows, diagnostics
