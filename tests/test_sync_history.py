@@ -1,3 +1,6 @@
+from unittest.mock import patch
+
+from app.providers import recent_trade_dates
 from app.services import incomplete_snapshot_dates, is_unavailable_daily_error, missing_trade_dates
 
 
@@ -19,3 +22,18 @@ def test_incremental_sync_repairs_incomplete_snapshots_but_skips_complete_days()
 def test_sync_skips_open_dates_that_do_not_have_published_daily_quotes_yet():
     assert is_unavailable_daily_error(RuntimeError("20260814 无日线数据（可能尚未收盘或无权限）"))
     assert not is_unavailable_daily_error(RuntimeError("Tushare 网络连接失败"))
+
+
+def test_recent_trade_dates_requests_only_tushare_open_days():
+    class Calendar:
+        empty = False
+        __getitem__ = lambda self, _: ["20260814", "20260813"]
+
+    class Pro:
+        def trade_cal(self, **kwargs):
+            assert kwargs["exchange"] == "SSE"
+            assert kwargs["is_open"] == "1"
+            return Calendar()
+
+    with patch("app.providers._ts", return_value=Pro()):
+        assert recent_trade_dates(2) == ["20260813", "20260814"]

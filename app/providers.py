@@ -306,17 +306,55 @@ def fetch_sectors(trade_date: str) -> SectorFetchResult:
     raise ProviderError("行业资金流所有来源均失败（" + "；".join(concise_failure(item) for item in failures) + "）")
 
 
-def fetch_sector_history(trade_dates: list[str], sector_names: list[str]) -> tuple[list[dict], list[str]]:
-    """Retrieve real daily Eastmoney history for the requested industries and trade dates.
+def fetch_tushare_sector_history(trade_dates: list[str]) -> tuple[list[dict], list[str], list[str]]:
+    """Fetch dated industry snapshots from Tushare before using public history.
 
-    The live rank endpoints only describe today, so historical snapshots must come from
-    the per-industry history endpoints.  Missing industries are reported rather than
-    copying today's values into prior trade dates.
+    Tushare's industry-flow endpoints accept ``trade_date`` and can therefore
+    provide genuine historical snapshots when the configured account has the
+    permission.  The returned diagnostics make unavailable permissions visible
+    instead of silently skipping this higher-priority source.
+    """
+    rows, unresolved_dates, diagnostics = [], [], []
+    providers = (
+        ("Tushare 同花顺", _fetch_tushare_ths_sector_frame, "tushare_ths"),
+        ("Tushare 东方财富", _fetch_tushare_dc_sector_frame, "tushare_dc"),
+    )
+    for trade_date in trade_dates:
+        date_failures = []
+        for label, fetch, source in providers:
+            try:
+                date_rows = _normalize_sector_rows(fetch(trade_date), trade_date, source)
+                rows.extend(date_rows)
+                diagnostics.append(f"{label}：{trade_date} 成功（{len(date_rows)} 条）")
+                break
+            except Exception as exc:
+                detail = str(exc)
+                if "无权限" in detail or "无接口" in detail or "access permission" in detail.lower():
+                    detail = "无接口访问权限"
+                elif len(detail) > 100:
+                    detail = detail[:97] + "..."
+                date_failures.append(f"{label}={detail}")
+        else:
+            unresolved_dates.append(trade_date)
+            diagnostics.append(f"Tushare：{trade_date} 未回填（{'；'.join(date_failures)}）")
+    return rows, unresolved_dates, diagnostics
+
+
+def fetch_sector_history(trade_dates: list[str], sector_names: list[str]) -> tuple[list[dict], list[str]]:
+    """Retrieve real historical snapshots, preferring dated Tushare industry flows.
+
+    Tushare is tried first for each requested day.  Dates still unavailable fall back
+    to Eastmoney's per-industry history endpoints.  AKShare THS and Tencent feeds are
+    intentionally not used here because their APIs are live-only and must not be
+    relabelled as historical data.
     """
     if not trade_dates or not sector_names:
         return [], []
-    wanted_dates = set(trade_dates)
-    start_date, end_date = min(trade_dates), max(trade_dates)
+    rows, unresolved_dates, diagnostics = fetch_tushare_sector_history(trade_dates)
+    if not unresolved_dates:
+        return rows, diagnostics
+    wanted_dates = set(unresolved_dates)
+    start_date, end_date = min(unresolved_dates), max(unresolved_dates)
 
     def normalize(symbol: str, flow_frame, price_frame) -> list[dict]:
         flows = {
@@ -339,7 +377,7 @@ def fetch_sector_history(trade_dates: list[str], sector_names: list[str]) -> tup
             })
         return rows
 
-    rows, failures = [], []
+    failures = []
     names = sorted(set(sector_names))
     # Warm AKShare's shared industry-name map once. Without this, multiple workers can
     # request the same Eastmoney mapping simultaneously and trigger 502/rate limits.
@@ -360,4 +398,12 @@ def fetch_sector_history(trade_dates: list[str], sector_names: list[str]) -> tup
                 rows.extend(future.result())
             except Exception as exc:
                 failures.append(f"{name}: {exc}")
-    return rows, failures
+    eastmoney_successes = len({row["sector_name"] for row in rows if row["trade_date"] in wanted_dates and row["source"] == "eastmoney_history"})
+    diagnostics.append(
+        f"东方财富行业历史：指定 {len(unresolved_dates)} 日，成功 {eastmoney_successes}/{len(names)} 个行业，失败 {len(failures)} 个行业"
+    )
+    diagnostics.append("同花顺、腾讯：仅支持当日快照，历史回填未使用")
+    # Individual industry exceptions can contain long provider URLs and are not useful
+    # in the dashboard.  The per-source summary above is actionable and keeps the
+    # persistent run status readable.
+    return rows, diagnostics

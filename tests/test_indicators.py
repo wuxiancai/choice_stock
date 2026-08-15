@@ -1,6 +1,6 @@
 from app.indicators import calculate
 from app.providers import ProviderError, SectorFetchResult, fetch_sectors
-from app.services import dashboard, format_cny, format_datetime, format_trade_date, normalize_signal_filters, recent_system_errors, record_system_error, sync_latest
+from app.services import dashboard, format_cny, format_datetime, format_trade_date, normalize_signal_filters, recent_system_errors, record_system_error, sector_source_summary, sync_latest
 from app.config import settings
 from app.database import connect, initialize
 from jinja2 import Environment, FileSystemLoader
@@ -38,6 +38,14 @@ def test_standard_display_time_formats_date_and_shanghai_time():
 def test_signal_filters_accept_supported_metrics_and_ignore_removed_metrics():
     filters = normalize_signal_filters({"min_volume_ratio": "1.2", "max_pb": "5", "min_score": "50", "max_total_mv": "1000", "min_macd": "0", "min_pct_chg": "2"})
     assert filters == {"min_volume_ratio": 1.2, "max_pb": 5.0}
+
+
+def test_sector_source_summary_distinguishes_failed_and_unattempted_sources():
+    summary = sector_source_summary("ths", ["tushare_ths: 无权限", "eastmoney: ProxyError: disconnected"])
+    assert "当日行业数据：同花顺 成功" in summary
+    assert "Tushare 同花顺：失败（无接口访问权限）" in summary
+    assert "东方财富：失败（网络/代理失败）" in summary
+    assert "未尝试：Tushare 东方财富、腾讯（前序来源已成功）" in summary
 
 
 def test_dashboard_template_renders_historical_signal_with_new_nullable_fields():
@@ -172,7 +180,8 @@ def test_sync_backfills_the_previous_four_sector_trade_dates(tmp_path):
              patch("app.services.fetch_sector_history", return_value=(history_rows, [])) as history_fetch:
             result = sync_latest()
         assert result["status"] == "success"
-        assert result["message"] == ""
+        assert "当日行业数据：同花顺 成功" in result["message"]
+        assert "Tushare 同花顺：失败（无接口访问权限）" in result["message"]
         history_fetch.assert_called_once_with(history_dates, [f"行业{index}" for index in range(30)])
         with connect() as conn:
             persisted_dates = [row[0] for row in conn.execute("SELECT DISTINCT trade_date FROM sector_snapshots ORDER BY trade_date")]

@@ -108,6 +108,32 @@ def is_unavailable_daily_error(error: Exception) -> bool:
     return "无日线数据" in str(error)
 
 
+def sector_source_summary(selected_source: str, fallback_errors: list[str]) -> str:
+    """Make source selection observable without exposing raw URLs or secrets."""
+    labels = {
+        "tushare_ths": "Tushare 同花顺", "tushare_dc": "Tushare 东方财富",
+        "eastmoney": "东方财富", "ths": "同花顺", "tencent": "腾讯",
+    }
+    attempted = []
+    for failure in fallback_errors:
+        source, _, detail = failure.partition(":")
+        label = labels.get(source, source)
+        lowered = detail.lower()
+        if "无权限" in detail or "无接口" in detail or "access permission" in lowered:
+            detail = "无接口访问权限"
+        elif "proxy" in lowered:
+            detail = "网络/代理失败"
+        elif len(detail.strip()) > 80:
+            detail = detail.strip()[:77] + "..."
+        attempted.append(f"{label}：失败（{detail.strip()}）")
+    selected = labels.get(selected_source, selected_source)
+    not_attempted = [label for key, label in labels.items() if key not in {selected_source, *(item.partition(":")[0] for item in fallback_errors)}]
+    parts = [f"当日行业数据：{selected} 成功", *attempted]
+    if not_attempted:
+        parts.append(f"未尝试：{'、'.join(not_attempted)}（前序来源已成功）")
+    return "；".join(parts)
+
+
 def sync_latest() -> dict:
     started = datetime.now(timezone.utc).isoformat()
     with connect() as conn:
@@ -147,6 +173,7 @@ def sync_latest() -> dict:
         try:
             sector_result = fetch_sectors(trade_date)
             sectors, sector_source = sector_result.rows, sector_result.source
+            sector_errors.append(sector_source_summary(sector_source, sector_result.fallback_errors))
             # A fallback that returned a complete data set is successful. Keep the
             # selected source in sync_runs.source, but do not surface failed probes
             # as a user-facing error.
@@ -158,11 +185,7 @@ def sync_latest() -> dict:
                     missing_history_dates, [row["sector_name"] for row in sectors],
                 )
                 sectors.extend(history_rows)
-                if history_failures:
-                    sector_errors.append(
-                        f"历史行业快照暂未回填：{len(history_failures)} 个行业的东方财富历史接口不可用；"
-                        "当日板块数据正常，稍后重试即可。"
-                    )
+                sector_errors.extend(history_failures)
         except ProviderError as exc:
             sector_errors.append(str(exc))
             record_system_error("sync_latest.sectors", exc)
