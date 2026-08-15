@@ -78,8 +78,11 @@ def recent_system_errors(limit: int = 50) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def normalize_signal_filters(raw_filters: dict[str, str]) -> dict[str, float]:
-    filters = {}
+def normalize_signal_filters(raw_filters: dict[str, str]) -> dict[str, float | str]:
+    filters: dict[str, float | str] = {}
+    stock_code = raw_filters.get("stock_code", "").strip().upper()
+    if stock_code:
+        filters["stock_code"] = stock_code
     for metric in FILTER_METRICS:
         for bound in ("min", "max"):
             key = f"{bound}_{metric}"
@@ -266,6 +269,10 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
         if signal_date:
             conditions, params = ["trade_date=?"], [signal_date]
             for key, value in filters.items():
+                if key == "stock_code":
+                    conditions.append("ts_code LIKE ?")
+                    params.append(f"{value}%")
+                    continue
                 bound, metric = key.split("_", 1)
                 conditions.append(f"{metric} {'>=' if bound == 'min' else '<='} ?")
                 params.append(value)

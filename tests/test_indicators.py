@@ -36,8 +36,8 @@ def test_standard_display_time_formats_date_and_shanghai_time():
 
 
 def test_signal_filters_accept_supported_metrics_and_ignore_removed_metrics():
-    filters = normalize_signal_filters({"min_volume_ratio": "1.2", "max_pb": "5", "min_score": "50", "max_total_mv": "1000", "min_macd": "0", "min_pct_chg": "2"})
-    assert filters == {"min_volume_ratio": 1.2, "max_pb": 5.0}
+    filters = normalize_signal_filters({"stock_code": " 000001.sz ", "min_volume_ratio": "1.2", "max_pb": "5", "min_score": "50", "max_total_mv": "1000", "min_macd": "0", "min_pct_chg": "2"})
+    assert filters == {"stock_code": "000001.SZ", "min_volume_ratio": 1.2, "max_pb": 5.0}
 
 
 def test_sector_source_summary_distinguishes_failed_and_unattempted_sources():
@@ -69,12 +69,34 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     assert "大单+特大单" in html
     assert 'data-sort-type="number"' in html
     filter_section = html.split('<div class="card"><h2>当日技术信号</h2>', 1)[0]
+    assert 'name="stock_code"' in filter_section
     for field in ("macd", "kdj_j", "rsi14", "boll_position", "pct_chg"):
         assert f'name="min_{field}"' not in filter_section
     for field in ("score", "total_mv"):
         assert f'name="min_{field}"' not in filter_section
     headers = html.split('<table id="signal-table">', 1)[1].split("</thead>", 1)[0]
     assert headers.index("评分") < headers.index("九转") < headers.index("涨跌幅")
+
+
+def test_dashboard_filters_signals_by_stock_code_prefix(tmp_path):
+    original_data_dir = settings.data_dir
+    object.__setattr__(settings, "data_dir", tmp_path)
+    try:
+        initialize()
+        with connect() as conn:
+            conn.execute("INSERT INTO sync_runs(started_at,trade_date,status) VALUES (?,?,?)", ("now", "20260813", "success"))
+            conn.executemany(
+                "INSERT INTO stock_signals(trade_date,ts_code,name,score,macd,kdj_j,rsi14,boll_position,nine_turn,reasons,source) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    ("20260813", "000001.SZ", "平安银行", 80, 0, 0, 0, 0, 0, "[]", "test"),
+                    ("20260813", "600000.SH", "浦发银行", 70, 0, 0, 0, 0, 0, "[]", "test"),
+                ],
+            )
+        result = dashboard({"stock_code": "000001"})
+        assert result["filters"] == {"stock_code": "000001"}
+        assert [row["ts_code"] for row in result["signals"]] == ["000001.SZ"]
+    finally:
+        object.__setattr__(settings, "data_dir", original_data_dir)
 
 
 def test_dashboard_adds_daily_sector_ranks(tmp_path):
