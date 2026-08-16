@@ -1,6 +1,6 @@
 from app.indicators import calculate
 from app.providers import ProviderError, SectorFetchResult, fetch_quotes, fetch_sector_history, fetch_sectors, fetch_tushare_sector_history
-from app.services import dashboard, format_cny, format_datetime, format_sector_date, format_trade_date, normalize_signal_filters, recent_system_errors, record_system_error, sector_source_summary, sync_latest
+from app.services import dashboard, format_cny, format_datetime, format_sector_date, format_trade_date, normalize_signal_filters, recent_system_errors, record_system_error, sector_source_summary, signal_tones, sync_latest
 from app.config import settings
 from app.database import connect, initialize
 from jinja2 import Environment, FileSystemLoader
@@ -36,6 +36,18 @@ def test_format_sector_date_is_compact_without_a_year():
     assert format_sector_date("20260104") == "1.04"
 
 
+def test_signal_tones_marks_bullish_values_green_and_risks_yellow():
+    tones = signal_tones({
+        "score": 75, "nine_turn": 8, "pct_chg": -1, "main_net_inflow": 1,
+        "pe": 12, "volume_ratio": 6, "turnover_rate": 8, "macd": 1,
+        "kdj_j": 110, "rsi14": 20, "boll_position": 1.1, "close": 10, "bbi": 9,
+        "bias": 7, "vr": 50, "psy": 80, "dmi": 30, "pb": 0.8,
+    })
+    assert tones["macd"] == tones["rsi14"] == tones["bbi"] == "positive"
+    assert tones["kdj_j"] == tones["nine_turn"] == tones["bias"] == "risk"
+    assert tones["amount"] == tones["total_mv"] == tones["dmi"] == "neutral"
+
+
 def test_standard_display_time_formats_date_and_shanghai_time():
     assert format_trade_date("20280814") == "2028-08-14"
     assert format_datetime("2028-08-14T06:35:03+00:00") == "2028-08-14 14:35:03"
@@ -68,6 +80,7 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
         "turnover_rate": None, "amount": 100, "total_mv": None, "pe": None, "pb": None,
         "pct_chg": None, "main_net_inflow": None, "reasons": "[]",
     }
+    signal["tones"] = signal_tones(signal)
     html = template.render(dashboard={"run": None, "dates": [], "sector_dates": ["20260814"], "sector_snapshot_dates": [], "sectors": [], "signals": [signal], "filters": {}, "system_errors": []})
     assert "000001.SZ" in html
     assert ">银行</td>" in html

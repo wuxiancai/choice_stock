@@ -102,6 +102,43 @@ def normalize_signal_filters(raw_filters: dict[str, str]) -> dict[str, float | s
     return filters
 
 
+def signal_tones(signal: dict) -> dict[str, str]:
+    """Classify each dashboard metric as favourable, risky, or directionless."""
+    def tone(value: float | int | None, positive, risk) -> str:
+        if value is None:
+            return "neutral"
+        if risk(value):
+            return "risk"
+        if positive(value):
+            return "positive"
+        return "neutral"
+
+    close, bbi = signal.get("close"), signal.get("bbi")
+    return {
+        "score": tone(signal.get("score"), lambda value: value >= 50, lambda value: value < 25),
+        "nine_turn": tone(signal.get("nine_turn"), lambda value: value <= -8 or 0 < value < 8, lambda value: value >= 8 or -8 < value < 0),
+        "pct_chg": tone(signal.get("pct_chg"), lambda value: 0 <= value < 7, lambda value: value < 0 or value >= 7),
+        "main_net_inflow": tone(signal.get("main_net_inflow"), lambda value: value > 0, lambda value: value < 0),
+        "pe": tone(signal.get("pe"), lambda value: 0 < value < 20, lambda value: value <= 0 or value >= 50),
+        "volume_ratio": tone(signal.get("volume_ratio"), lambda value: 1 <= value <= 3, lambda value: value < 0.8 or value > 5),
+        "turnover_rate": tone(signal.get("turnover_rate"), lambda value: 3 <= value <= 15, lambda value: value < 1 or value > 20),
+        "macd": tone(signal.get("macd"), lambda value: value > 0, lambda value: value < 0),
+        "kdj_j": tone(signal.get("kdj_j"), lambda value: value < 80, lambda value: value > 100),
+        "rsi14": tone(signal.get("rsi14"), lambda value: value < 30, lambda value: value > 70),
+        "boll_position": tone(signal.get("boll_position"), lambda value: value <= 0, lambda value: value >= 1),
+        "bbi": "neutral" if close is None or bbi is None else ("positive" if close >= bbi else "risk"),
+        "bias": tone(signal.get("bias"), lambda value: value <= -6, lambda value: value >= 6),
+        "vr": tone(signal.get("vr"), lambda value: value < 70, lambda value: value > 450),
+        "psy": tone(signal.get("psy"), lambda value: value < 25, lambda value: value > 75),
+        # 当前仅保存 ADX 强度，未保存 +/-DI 方向，不能据此判断多空。
+        "dmi": "neutral",
+        # 成交额与市值本身没有多空方向，保持中性而不伪造交易信号。
+        "amount": "neutral",
+        "total_mv": "neutral",
+        "pb": tone(signal.get("pb"), lambda value: 0 < value <= 1, lambda value: value <= 0 or value >= 5),
+    }
+
+
 def missing_trade_dates(trade_dates: list[str], existing_dates: set[str]) -> list[str]:
     return [trade_date for trade_date in trade_dates if trade_date not in existing_dates]
 
@@ -277,17 +314,19 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
             [*dates, MIN_VALID_SECTOR_ROWS],
         )] if dates else []
         if signal_date:
-            conditions, params = ["trade_date=?"], [signal_date]
+            conditions, params = ["stock_signals.trade_date=?"], [signal_date]
             for key, value in filters.items():
                 if key == "stock_code":
-                    conditions.append("(ts_code LIKE ? OR name LIKE ?)")
+                    conditions.append("(stock_signals.ts_code LIKE ? OR stock_signals.name LIKE ?)")
                     params.extend((f"{value}%", f"{value}%"))
                     continue
                 bound, metric = key.split("_", 1)
-                conditions.append(f"{metric} {'>=' if bound == 'min' else '<='} ?")
+                conditions.append(f"stock_signals.{metric} {'>=' if bound == 'min' else '<='} ?")
                 params.append(value)
             signals = conn.execute(
-                "SELECT * FROM stock_signals WHERE " + " AND ".join(conditions) + " ORDER BY main_net_inflow IS NULL, main_net_inflow DESC, score DESC LIMIT 300",
+                "SELECT stock_signals.*, daily_quotes.close AS close FROM stock_signals "
+                "LEFT JOIN daily_quotes ON daily_quotes.trade_date=stock_signals.trade_date AND daily_quotes.ts_code=stock_signals.ts_code "
+                "WHERE " + " AND ".join(conditions) + " ORDER BY stock_signals.main_net_inflow IS NULL, stock_signals.main_net_inflow DESC, stock_signals.score DESC LIMIT 300",
                 params,
             ).fetchall()
         else:
@@ -321,5 +360,5 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
     sectors.sort(key=lambda row: (row["latest_change"] is None, -(row["latest_change"] or 0), row["sector_name"]))
     return {
         "run": dict(run) if run else None, "dates": dates, "sector_dates": dates[::-1], "sector_snapshot_dates": sector_snapshot_dates, "sectors": sectors,
-        "signals": [dict(x) for x in signals], "filters": filters, "system_errors": recent_system_errors(),
+        "signals": [{**dict(row), "tones": signal_tones(dict(row))} for row in signals], "filters": filters, "system_errors": recent_system_errors(),
     }
