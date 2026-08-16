@@ -41,6 +41,11 @@ def format_trade_date(trade_date: str) -> str:
     return f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
 
 
+def format_sector_date(trade_date: str) -> str:
+    """Format an industry-board trade date compactly, e.g. 20260814 -> 8.14."""
+    return f"{int(trade_date[4:6])}.{trade_date[6:8]}"
+
+
 def format_datetime(value: str | None) -> str:
     """Render persisted timestamps in the configured local timezone."""
     if not value:

@@ -1,6 +1,6 @@
 from app.indicators import calculate
 from app.providers import ProviderError, SectorFetchResult, fetch_quotes, fetch_sector_history, fetch_sectors, fetch_tushare_sector_history
-from app.services import dashboard, format_cny, format_datetime, format_trade_date, normalize_signal_filters, recent_system_errors, record_system_error, sector_source_summary, sync_latest
+from app.services import dashboard, format_cny, format_datetime, format_sector_date, format_trade_date, normalize_signal_filters, recent_system_errors, record_system_error, sector_source_summary, sync_latest
 from app.config import settings
 from app.database import connect, initialize
 from jinja2 import Environment, FileSystemLoader
@@ -31,6 +31,11 @@ def test_format_cny_uses_yi_or_wan_with_source_unit_multiplier():
     assert format_cny(None) == "—"
 
 
+def test_format_sector_date_is_compact_without_a_year():
+    assert format_sector_date("20260814") == "8.14"
+    assert format_sector_date("20260104") == "1.04"
+
+
 def test_standard_display_time_formats_date_and_shanghai_time():
     assert format_trade_date("20280814") == "2028-08-14"
     assert format_datetime("2028-08-14T06:35:03+00:00") == "2028-08-14 14:35:03"
@@ -53,6 +58,7 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     environment = Environment(loader=FileSystemLoader("app/templates"))
     environment.filters["cny"] = format_cny
     environment.filters["trade_date"] = format_trade_date
+    environment.filters["sector_date"] = format_sector_date
     environment.filters["datetime"] = format_datetime
     template = environment.get_template("index.html")
     signal = {
@@ -62,7 +68,7 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
         "turnover_rate": None, "amount": 100, "total_mv": None, "pe": None, "pb": None,
         "pct_chg": None, "main_net_inflow": None, "reasons": "[]",
     }
-    html = template.render(dashboard={"run": None, "dates": [], "sector_dates": [], "sectors": [], "signals": [signal], "filters": {}, "system_errors": []})
+    html = template.render(dashboard={"run": None, "dates": [], "sector_dates": ["20260814"], "sector_snapshot_dates": [], "sectors": [], "signals": [signal], "filters": {}, "system_errors": []})
     assert "000001.SZ" in html
     assert ">银行</td>" in html
     assert "—" in html
@@ -72,6 +78,10 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     assert "数据研究用途，不构成投资建议。每日 21:00（上海时区）自动分析。" not in html
     assert "A股盘后选股" not in html
     assert 'id="sector-table-wrap"' in html
+    assert 'id="sector-table"' in html
+    assert "#sector-table{width:auto;table-layout:auto}" in html
+    assert ">8.14</th>" in html
+    assert "2026-08-14</th>" not in html
     assert "event.preventDefault()" in html
     assert "'#' ~ row.daily_ranks" not in html
     assert "repeat(8,minmax(0,1fr))" in html
