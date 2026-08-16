@@ -98,8 +98,8 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     assert "event.preventDefault()" in html
     assert "'#' ~ row.daily_ranks" not in html
     assert "repeat(8,minmax(0,1fr))" in html
-    assert 'class="sortable nine-turn-header"' in html
-    assert 'class="nine-turn-filter"' in html
+    assert "nine-turn-header" not in html
+    assert "nine-turn-filter" not in html
     assert ">净流入</th>" in html
     assert "主力净流入<br><small>大单+特大单</small>" not in html
     assert "主力净流入（大单+特大单，元）" not in html
