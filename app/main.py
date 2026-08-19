@@ -23,7 +23,7 @@ templates.env.filters["datetime"] = format_datetime
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     initialize()
-    scheduler.add_job(sync_latest, "cron", hour=21, minute=0, id="nightly_sync", replace_existing=True)
+    scheduler.add_job(sync_latest, "cron", hour=17, minute=0, id="nightly_sync", replace_existing=True)
     scheduler.start()
     yield
     scheduler.shutdown(wait=False)
