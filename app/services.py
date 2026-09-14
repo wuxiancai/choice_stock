@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timezone
+from functools import lru_cache
+from statistics import median
 from zoneinfo import ZoneInfo
 
 from .config import settings
@@ -177,6 +179,7 @@ def score_signal(metrics: dict[str, float | int | None], nine_turn: int | None, 
 
 
 RECOMMENDATION_REASONS = "九转启动（1–3）｜涨幅 2%–7%｜主力净流入｜量能不低于近 5 日均量｜RSI<60｜未突破布林上轨"
+RECOMMENDATION_MIN_GROUP_SAMPLES = 12
 
 
 def is_recommended_signal(signal: dict, previous_five_volumes: list[float]) -> bool:
@@ -197,6 +200,81 @@ def is_recommended_signal(signal: dict, previous_five_volumes: list[float]) -> b
         and len(previous_five_volumes) == 5
         and current_volume >= sum(previous_five_volumes) / len(previous_five_volumes)
     )
+
+
+def _historical_candidate(rows: list[dict], index: int, nine_turn: int | None) -> dict | None:
+    if index < 20 or nine_turn not in (1, 2, 3):
+        return None
+    row = rows[index]
+    if not (2 <= (row.get("pct_chg") or 0) <= 7) or (row.get("main_net_inflow") or 0) <= 0:
+        return None
+    closes = [item["close"] for item in rows[index - 20:index + 1]]
+    if any(value is None for value in closes):
+        return None
+    gains = [max(closes[position] - closes[position - 1], 0) for position in range(7, 21)]
+    losses = [max(closes[position - 1] - closes[position], 0) for position in range(7, 21)]
+    average_gain, average_loss = sum(gains) / 14, sum(losses) / 14
+    rsi14 = 100 if average_loss == 0 else 100 - 100 / (1 + average_gain / average_loss)
+    middle = sum(closes[-20:]) / 20
+    deviation = (sum((value - middle) ** 2 for value in closes[-20:]) / 20) ** 0.5
+    upper, lower = middle + 2 * deviation, middle - 2 * deviation
+    return {**row, "nine_turn": nine_turn, "rsi14": rsi14, "boll_position": 0.5 if upper == lower else (closes[-1] - lower) / (upper - lower)}
+
+
+@lru_cache(maxsize=8)
+def historical_recommendation_stats(as_of_date: str) -> dict[tuple[int | None, str | None], dict]:
+    """Five-day outcomes of prior matching candidates only; no current-day look-ahead."""
+    outcomes: dict[tuple[int | None, str | None], list[float]] = {}
+    with connect() as conn:
+        cursor = conn.execute(
+            "SELECT trade_date,ts_code,industry,close,pct_chg,vol,amount,main_net_inflow "
+            "FROM daily_quotes WHERE trade_date<? ORDER BY ts_code,trade_date", (as_of_date,),
+        )
+        code, rows = None, []
+
+        def collect(stock_rows: list[dict]) -> None:
+            upward_run, turns = 0, []
+            for index, item in enumerate(stock_rows):
+                upward_run = upward_run + 1 if index >= 4 and item["close"] > stock_rows[index - 4]["close"] else 0
+                turns.append((upward_run - 1) % 9 + 1 if upward_run else None)
+            for index in range(20, len(stock_rows) - 5):
+                candidate = _historical_candidate(stock_rows, index, turns[index])
+                volumes = [item["vol"] for item in stock_rows[index - 5:index] if item["vol"] is not None]
+                if candidate is None or not is_recommended_signal(candidate, volumes):
+                    continue
+                five_day_return = (stock_rows[index + 5]["close"] / stock_rows[index]["close"] - 1) * 100
+                for key in ((candidate["nine_turn"], candidate.get("industry")), (candidate["nine_turn"], None), (None, None)):
+                    outcomes.setdefault(key, []).append(five_day_return)
+
+        for row in cursor:
+            item = dict(row)
+            if code is not None and item["ts_code"] != code:
+                collect(rows)
+                rows = []
+            code = item["ts_code"]
+            rows.append(item)
+        if rows:
+            collect(rows)
+    stats = {}
+    for key, values in outcomes.items():
+        label = "同转同行业" if key[1] is not None else ("同转全部行业" if key[0] is not None else "全部候选")
+        stats[key] = {"sample_size": len(values), "win_rate": round(sum(value > 0 for value in values) * 100 / len(values), 2), "median_return": round(float(median(values)), 2), "label": label}
+    return stats
+
+
+def rank_daily_recommendations(recommendations: list[dict], stats: dict[tuple[int | None, str | None], dict]) -> list[dict]:
+    fallback = stats.get((None, None), {"sample_size": 0, "win_rate": 0.0, "median_return": 0.0, "label": "样本不足"})
+    ranked = []
+    for recommendation in recommendations:
+        profile = stats.get((recommendation["nine_turn"], recommendation.get("industry")))
+        if not profile or profile["sample_size"] < RECOMMENDATION_MIN_GROUP_SAMPLES:
+            profile = stats.get((recommendation["nine_turn"], None), fallback)
+        history_score = max(0, min(100, round(profile["win_rate"] + profile["median_return"] * 5, 2)))
+        ranked.append({**recommendation, "historical_win_rate": profile["win_rate"], "historical_median_return": profile["median_return"], "historical_sample_size": profile["sample_size"], "historical_basis": profile["label"], "recommendation_score": history_score})
+    ranked.sort(key=lambda row: (-row["recommendation_score"], -row["historical_win_rate"], -row["historical_median_return"], -(row["main_net_inflow"] or 0), row["ts_code"]))
+    for index, recommendation in enumerate(ranked, start=1):
+        recommendation["recommendation_rank"] = index
+    return ranked
 
 
 def daily_recommendations(conn, signal_date: str) -> list[dict]:
@@ -220,8 +298,7 @@ def daily_recommendations(conn, signal_date: str) -> list[dict]:
             signal["recommendation_reasons"] = RECOMMENDATION_REASONS
             signal["tones"] = signal_tones(signal)
             recommendations.append(signal)
-    recommendations.sort(key=lambda row: (-(row["main_net_inflow"] or 0), -row["score"], row["ts_code"]))
-    return recommendations
+    return rank_daily_recommendations(recommendations, historical_recommendation_stats(signal_date))
 
 
 def normalize_sync_start_date(value: str | None) -> str | None:
@@ -349,6 +426,7 @@ def sync_latest(start_date: str | None = None) -> dict:
             conn.execute("UPDATE sync_runs SET finished_at=?,trade_date=?,status=?,source=?,message=?,quote_count=?,sector_count=? WHERE id=?",
                 (datetime.now(timezone.utc).isoformat(), trade_date, "success" if sector_complete else "partial", f"tushare,{sector_source}" if sector_source else "tushare", sector_error, len({row["ts_code"] for row in quotes if row["trade_date"] == trade_date}), len(sectors), run_id))
         calculate_signals(trade_date)
+        historical_recommendation_stats.cache_clear()
         return {"trade_date": trade_date, "quote_count": len(quotes), "sector_count": len(sectors), "status": "success" if sector_complete else "partial", "message": sector_error}
     except Exception as exc:
         with connect() as conn:

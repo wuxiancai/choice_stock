@@ -1,6 +1,6 @@
 from app.indicators import calculate
 from app.providers import ProviderError, SectorFetchResult, fetch_quotes, fetch_sector_history, fetch_sectors, fetch_tushare_sector_history
-from app.services import dashboard, format_cny, format_datetime, format_sector_date, format_trade_date, is_recommended_signal, normalize_signal_filters, recent_system_errors, record_system_error, sector_source_summary, signal_tones, sync_latest
+from app.services import dashboard, format_cny, format_datetime, format_sector_date, format_trade_date, is_recommended_signal, normalize_signal_filters, rank_daily_recommendations, recent_system_errors, record_system_error, sector_source_summary, signal_tones, sync_latest
 from app.config import settings
 from app.database import connect, initialize
 from jinja2 import Environment, FileSystemLoader
@@ -82,6 +82,23 @@ def test_recommendation_uses_only_early_nine_turn_with_confirmed_price_volume_an
     assert not is_recommended_signal({**signal, "vol": 99}, [100] * 5)
 
 
+def test_recommendation_rank_uses_historical_five_day_win_rate_and_return_not_current_signal_score():
+    recommendations = [
+        {"ts_code": "000001.SZ", "nine_turn": 1, "industry": "电子", "score": 100, "main_net_inflow": 1},
+        {"ts_code": "000002.SZ", "nine_turn": 1, "industry": "电子", "score": 25, "main_net_inflow": 1},
+    ]
+    stats = {
+        (1, "电子"): {"sample_size": 30, "win_rate": 62.0, "median_return": 1.5, "label": "同转同行业"},
+        (1, None): {"sample_size": 100, "win_rate": 48.0, "median_return": -0.5, "label": "同转全部行业"},
+        (None, None): {"sample_size": 300, "win_rate": 45.0, "median_return": -1.0, "label": "全部候选"},
+    }
+    ranked = rank_daily_recommendations(recommendations, stats)
+    assert [row["recommendation_rank"] for row in ranked] == [1, 2]
+    assert all(row["historical_win_rate"] == 62.0 for row in ranked)
+    assert all(row["historical_median_return"] == 1.5 for row in ranked)
+    assert all(row["historical_basis"] == "同转同行业" for row in ranked)
+
+
 def test_sector_source_summary_distinguishes_failed_and_unattempted_sources():
     summary = sector_source_summary("tushare_moneyflow", [])
     assert "当日行业数据：Tushare 申万一级行业聚合 成功" in summary
@@ -128,6 +145,12 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     assert "主力净流入<br><small>大单+特大单</small>" not in html
     assert "主力净流入（大单+特大单，元）" not in html
     assert 'data-sort-type="number"' in html
+    assert 'id="recommendation-table"' in html
+    assert "序号由同一转数、同一行业的历史 5 日胜率与中位收益计算" in html
+    assert 'row.dataset.sortRow===\'true\'||row.cells.length===allHeaders.length' in html
+    recommendation_headers = html.split('<table id="recommendation-table">', 1)[1].split("</thead>", 1)[0]
+    assert recommendation_headers.index("序号") < recommendation_headers.index("股票")
+    assert "历史5日胜率" in recommendation_headers
     filter_section = html
     assert 'name="stock_code"' in filter_section
     for field in ("macd", "kdj_j", "rsi14", "boll_position", "pct_chg"):
