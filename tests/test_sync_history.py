@@ -1,7 +1,7 @@
 from unittest.mock import patch
 
-from app.providers import recent_trade_dates
-from app.services import incomplete_snapshot_dates, is_unavailable_daily_error, missing_trade_dates
+from app.providers import recent_trade_dates, trade_dates_since
+from app.services import incomplete_snapshot_dates, is_unavailable_daily_error, missing_trade_dates, normalize_sync_start_date
 
 
 def test_first_sync_backfills_all_recent_ninety_open_days():
@@ -37,3 +37,30 @@ def test_recent_trade_dates_requests_only_tushare_open_days():
 
     with patch("app.providers._ts", return_value=Pro()):
         assert recent_trade_dates(2) == ["20260813", "20260814"]
+
+
+def test_trade_dates_since_requests_open_days_from_selected_date():
+    class Calendar:
+        empty = False
+        __getitem__ = lambda self, _: ["20260814", "20260813"]
+
+    class Pro:
+        def trade_cal(self, **kwargs):
+            assert kwargs["exchange"] == "SSE"
+            assert kwargs["is_open"] == "1"
+            assert kwargs["start_date"] == "20260801"
+            return Calendar()
+
+    with patch("app.providers._ts", return_value=Pro()):
+        assert trade_dates_since("20260801") == ["20260813", "20260814"]
+
+
+def test_normalize_sync_start_date_accepts_browser_date_and_rejects_invalid_values():
+    assert normalize_sync_start_date("2026-08-01") == "20260801"
+    assert normalize_sync_start_date("") is None
+    try:
+        normalize_sync_start_date("20260801")
+    except ValueError as exc:
+        assert str(exc) == "同步起始日期必须为 YYYY-MM-DD"
+    else:
+        raise AssertionError("invalid date should be rejected")

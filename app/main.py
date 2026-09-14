@@ -52,9 +52,11 @@ def api_dashboard(request: Request):
 
 
 @app.post("/api/sync")
-def api_sync():
+def api_sync(start_date: str | None = None):
     try:
-        return sync_latest()
+        return sync_latest(start_date=start_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

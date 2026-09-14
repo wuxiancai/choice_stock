@@ -131,6 +131,22 @@ def recent_trade_dates(days: int = 90) -> list[str]:
         raise ProviderError(f"读取交易日历失败：{exc}") from exc
 
 
+def trade_dates_since(start_date: str) -> list[str]:
+    """Return SSE open dates from an inclusive YYYYMMDD start date through today."""
+    pro = _ts()
+    try:
+        calendar = pro.trade_cal(
+            exchange="SSE", start_date=start_date, end_date=date.today().strftime("%Y%m%d"), is_open="1",
+        )
+        if calendar.empty:
+            raise ProviderError(f"{start_date} 起未找到开市日")
+        return sorted(str(value) for value in calendar["cal_date"])
+    except ProviderError:
+        raise
+    except Exception as exc:
+        raise ProviderError(f"读取交易日历失败：{exc}") from exc
+
+
 def latest_trade_date() -> str:
     return recent_trade_dates(1)[0]
 

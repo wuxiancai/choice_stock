@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from .config import settings
 from .database import connect, initialize
 from .indicators import calculate
-from .providers import MIN_VALID_SECTOR_ROWS, ProviderError, fetch_quotes, fetch_sector_history, fetch_sectors, recent_trade_dates
+from .providers import MIN_VALID_SECTOR_ROWS, ProviderError, fetch_quotes, fetch_sector_history, fetch_sectors, recent_trade_dates, trade_dates_since
 
 
 FILTER_METRICS = (
@@ -154,6 +154,19 @@ def is_unavailable_daily_error(error: Exception) -> bool:
     return "无日线数据" in str(error)
 
 
+def normalize_sync_start_date(value: str | None) -> str | None:
+    """Validate a browser date input and convert it to Tushare's YYYYMMDD form."""
+    if not value or not value.strip():
+        return None
+    try:
+        parsed = datetime.strptime(value.strip(), "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError("同步起始日期必须为 YYYY-MM-DD") from exc
+    if parsed > date.today():
+        raise ValueError("同步起始日期不能晚于今天")
+    return parsed.strftime("%Y%m%d")
+
+
 def sector_source_summary(selected_source: str, fallback_errors: list[str]) -> str:
     """Make source selection observable without exposing raw URLs or secrets."""
     labels = {
@@ -179,13 +192,14 @@ def sector_source_summary(selected_source: str, fallback_errors: list[str]) -> s
     return "；".join(parts)
 
 
-def sync_latest() -> dict:
+def sync_latest(start_date: str | None = None) -> dict:
     started = datetime.now(timezone.utc).isoformat()
     with connect() as conn:
         run_id = conn.execute("INSERT INTO sync_runs(started_at,status) VALUES (?,?)", (started, "running")).lastrowid
     try:
-        # 日历可能先于日线发布。多取候选日，以确保最后至少能获得 90 个实际可用交易日。
-        trade_dates = recent_trade_dates(120)
+        normalized_start_date = normalize_sync_start_date(start_date)
+        # 未指定日期时沿用首次同步的 90 个有效交易日回补策略；指定后严格从该日期起同步。
+        trade_dates = trade_dates_since(normalized_start_date) if normalized_start_date else recent_trade_dates(120)
         with connect() as conn:
             quote_counts = dict(conn.execute(
                 "SELECT trade_date, COUNT(*) FROM daily_quotes WHERE trade_date IN (%s) GROUP BY trade_date" % ",".join("?" * len(trade_dates)),
@@ -203,7 +217,10 @@ def sync_latest() -> dict:
                     continue
                 raise
         available_dates = [sync_date for sync_date in trade_dates if sync_date not in unavailable_dates]
-        if len(available_dates) < 90:
+        minimum_available_dates = 1 if normalized_start_date else 90
+        if len(available_dates) < minimum_available_dates:
+            if normalized_start_date:
+                raise ProviderError(f"{normalized_start_date} 起没有已发布日线数据")
             raise ProviderError(f"仅找到 {len(available_dates)} 个有日线的交易日，无法满足 90 日回补")
         trade_date = available_dates[-1]
         # 最新日额外获取主力资金，覆盖前面的纯历史日线记录。
