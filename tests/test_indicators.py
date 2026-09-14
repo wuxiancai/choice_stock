@@ -23,12 +23,12 @@ def test_calculate_marks_a_completed_downward_nine_turn_as_negative():
     assert metrics["nine_turn"] == -9
 
 
-def test_calculate_does_not_repeat_nine_turn_after_the_ninth_consecutive_setup_bar():
+def test_calculate_restarts_nine_turn_at_one_after_the_ninth_consecutive_setup_bar():
     ninth_bar = [100] * 26 + list(range(101, 110))
     tenth_bar = ninth_bar + [110]
 
     assert calculate(ninth_bar, [x + 0.2 for x in ninth_bar], [x - 0.2 for x in ninth_bar])["nine_turn"] == 9
-    assert calculate(tenth_bar, [x + 0.2 for x in tenth_bar], [x - 0.2 for x in tenth_bar])["nine_turn"] is None
+    assert calculate(tenth_bar, [x + 0.2 for x in tenth_bar], [x - 0.2 for x in tenth_bar])["nine_turn"] == 1
 
 
 def test_calculate_does_not_carry_forward_a_previous_nine_turn_when_today_has_no_signal():
