@@ -277,7 +277,7 @@ def calculate_signals(trade_date: str) -> None:
             for key, threshold, label in (("macd", 0, "MACD 金叉区间"), ("kdj_j", 50, "KDJ 偏强"), ("rsi14", 50, "RSI 强势")):
                 if v[key] > threshold:
                     score += 25; reasons.append(label)
-            if v["nine_turn"] >= 8:
+            if v["nine_turn"] is not None and v["nine_turn"] >= 8:
                 score += 25; reasons.append("九转上行")
             if rows[-1]["main_net_inflow"] > 0:
                 score += 25; reasons.append("主力资金净流入")

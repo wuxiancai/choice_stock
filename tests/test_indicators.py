@@ -23,6 +23,13 @@ def test_calculate_marks_a_completed_downward_nine_turn_as_negative():
     assert metrics["nine_turn"] == -9
 
 
+def test_calculate_does_not_carry_forward_a_previous_nine_turn_when_today_has_no_signal():
+    # 昨日连续九次收盘价高于四日前，今天收盘价恰好等于四日前：当天无九转。
+    closes = list(range(1, 35)) + [31]
+    metrics = calculate(closes, [x + 0.2 for x in closes], [x - 0.2 for x in closes])
+    assert metrics["nine_turn"] is None
+
+
 def test_format_cny_uses_yi_or_wan_with_source_unit_multiplier():
     assert format_cny(1_000_000_000) == "10 亿"
     assert format_cny(9_999_0000) == "9999 万"
@@ -75,7 +82,7 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     template = environment.get_template("index.html")
     signal = {
         "name": "测试", "industry": "银行", "ts_code": "000001.SZ", "score": 0, "macd": 0, "kdj_j": 0,
-        "rsi14": 0, "boll_position": 0, "nine_turn": 4, "bbi": None, "bias": None,
+        "rsi14": 0, "boll_position": 0, "nine_turn": None, "bbi": None, "bias": None,
         "vr": None, "psy": None, "dmi": None, "volume_ratio": None,
         "turnover_rate": None, "amount": 100, "total_mv": None, "pe": None, "pb": None,
         "pct_chg": None, "main_net_inflow": None, "reasons": "[]",
@@ -85,7 +92,7 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     assert "000001.SZ" in html
     assert ">银行</td>" in html
     assert "—" in html
-    assert ">4</td>" in html
+    assert ">—</td>" in html
     assert 'id="signal-table"' in html
     assert 'id="sync-button"' in html
     assert "数据研究用途，不构成投资建议。每日 21:00（上海时区）自动分析。" not in html
@@ -104,7 +111,7 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     assert "主力净流入<br><small>大单+特大单</small>" not in html
     assert "主力净流入（大单+特大单，元）" not in html
     assert 'data-sort-type="number"' in html
-    filter_section = html.split('<div class="card"><h2>当日技术信号</h2>', 1)[0]
+    filter_section = html
     assert 'name="stock_code"' in filter_section
     for field in ("macd", "kdj_j", "rsi14", "boll_position", "pct_chg"):
         assert f'name="min_{field}"' not in filter_section

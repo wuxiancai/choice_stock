@@ -48,7 +48,8 @@ def calculate(
         else:
             break
     # 正数表示连续收盘价高于四日前（高位卖出提示），负数表示连续低于四日前（低位买入提示）。
-    nine_turn = upward_turns if upward_turns else -downward_turns
+    # 当日与四日前收盘价相等时，九转没有新的计数；不能沿用上一交易日的数字。
+    nine_turn = upward_turns or (-downward_turns if downward_turns else None)
     bbi = sum(sum(closes[-period:]) / period for period in (3, 6, 12, 24)) / 4
     bias_base = sum(closes[-6:]) / 6
     bias = (closes[-1] - bias_base) * 100 / bias_base if bias_base else None
