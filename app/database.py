@@ -36,6 +36,13 @@ CREATE TABLE IF NOT EXISTS system_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, level TEXT NOT NULL,
   source TEXT NOT NULL, message TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS watchlist (
+  ts_code TEXT PRIMARY KEY, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS manual_recommendations (
+  trade_date TEXT NOT NULL, ts_code TEXT NOT NULL, created_at TEXT NOT NULL,
+  PRIMARY KEY(trade_date, ts_code)
+);
 """
 
 

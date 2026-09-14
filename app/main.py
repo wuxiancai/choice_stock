@@ -10,7 +10,7 @@ from fastapi.templating import Jinja2Templates
 
 from .config import settings
 from .database import initialize
-from .services import dashboard, format_cny, format_datetime, format_sector_date, format_trade_date, record_system_error, sync_latest
+from .services import add_to_watchlist, dashboard, format_cny, format_datetime, format_sector_date, format_trade_date, record_system_error, remove_from_watchlist, sync_latest
 
 scheduler = BackgroundScheduler(timezone=settings.timezone)
 templates = Jinja2Templates(directory="app/templates")
@@ -59,6 +59,22 @@ def api_sync(start_date: str | None = None):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/watchlist/{ts_code}")
+def api_add_to_watchlist(ts_code: str):
+    try:
+        return {"added": add_to_watchlist(ts_code)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete("/api/watchlist/{ts_code}")
+def api_remove_from_watchlist(ts_code: str):
+    try:
+        return {"removed": remove_from_watchlist(ts_code)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/healthz")

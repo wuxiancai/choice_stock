@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timezone
 from functools import lru_cache
 from statistics import median
@@ -180,6 +181,32 @@ def score_signal(metrics: dict[str, float | int | None], nine_turn: int | None, 
 
 RECOMMENDATION_REASONS = "九转启动（1–3）｜涨幅 2%–7%｜主力净流入｜量能不低于近 5 日均量｜RSI<60｜未突破布林上轨"
 RECOMMENDATION_MIN_GROUP_SAMPLES = 12
+TS_CODE_PATTERN = re.compile(r"^\d{6}\.(?:SZ|SH|BJ)$")
+
+
+def _watchlist_ts_code(value: str) -> str:
+    ts_code = value.strip().upper()
+    if not TS_CODE_PATTERN.fullmatch(ts_code):
+        raise ValueError("股票代码必须是完整的 Tushare 代码，例如 000001.SZ")
+    return ts_code
+
+
+def add_to_watchlist(value: str) -> bool:
+    """Persist a stock once; repeat clicks are intentionally idempotent."""
+    ts_code = _watchlist_ts_code(value)
+    with connect() as conn:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO watchlist(ts_code,created_at) VALUES (?,?)",
+            (ts_code, datetime.now(timezone.utc).isoformat()),
+        )
+    return cursor.rowcount == 1
+
+
+def remove_from_watchlist(value: str) -> bool:
+    ts_code = _watchlist_ts_code(value)
+    with connect() as conn:
+        cursor = conn.execute("DELETE FROM watchlist WHERE ts_code=?", (ts_code,))
+    return cursor.rowcount == 1
 
 
 def is_recommended_signal(signal: dict, previous_five_volumes: list[float]) -> bool:
@@ -496,9 +523,18 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
                 params,
             ).fetchall()
             recommendations = daily_recommendations(conn, signal_date)
+            watchlist = conn.execute(
+                "SELECT watchlist.ts_code,watchlist.created_at,stock_signals.name,stock_signals.industry,"
+                "stock_signals.score,stock_signals.nine_turn,stock_signals.pct_chg,stock_signals.main_net_inflow "
+                "FROM watchlist LEFT JOIN stock_signals "
+                "ON stock_signals.ts_code=watchlist.ts_code AND stock_signals.trade_date=? "
+                "ORDER BY watchlist.created_at DESC",
+                (signal_date,),
+            ).fetchall()
         else:
             signals = []
             recommendations = []
+            watchlist = conn.execute("SELECT ts_code,created_at,NULL AS name,NULL AS industry,NULL AS score,NULL AS nine_turn,NULL AS pct_chg,NULL AS main_net_inflow FROM watchlist ORDER BY created_at DESC").fetchall()
     snapshots_by_sector: dict[str, dict[str, dict]] = {}
     daily_ranks: dict[str, dict[str, int]] = {}
     for trade_date in dates:
@@ -529,5 +565,6 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
     return {
         "run": dict(run) if run else None, "dates": dates, "sector_dates": dates[::-1], "sector_snapshot_dates": sector_snapshot_dates, "sectors": sectors,
         "signals": [{**dict(row), "tones": signal_tones(dict(row))} for row in signals], "recommendations": recommendations,
+        "watchlist": [{**dict(row), "tones": signal_tones(dict(row))} for row in watchlist],
         "filters": filters, "system_errors": recent_system_errors(),
     }

@@ -1,6 +1,6 @@
 from app.indicators import calculate
 from app.providers import ProviderError, SectorFetchResult, fetch_quotes, fetch_sector_history, fetch_sectors, fetch_tushare_sector_history
-from app.services import dashboard, format_cny, format_datetime, format_sector_date, format_trade_date, is_recommended_signal, normalize_signal_filters, rank_daily_recommendations, recent_system_errors, record_system_error, sector_source_summary, signal_tones, sync_latest
+from app.services import add_to_watchlist, dashboard, format_cny, format_datetime, format_sector_date, format_trade_date, is_recommended_signal, normalize_signal_filters, rank_daily_recommendations, recent_system_errors, record_system_error, remove_from_watchlist, sector_source_summary, signal_tones, sync_latest
 from app.config import settings
 from app.database import connect, initialize
 from jinja2 import Environment, FileSystemLoader
@@ -99,6 +99,27 @@ def test_recommendation_rank_uses_historical_five_day_win_rate_and_return_not_cu
     assert all(row["historical_basis"] == "同转同行业" for row in ranked)
 
 
+def test_watchlist_persists_once_and_uses_the_latest_signal_for_display(tmp_path):
+    original_data_dir = settings.data_dir
+    object.__setattr__(settings, "data_dir", tmp_path)
+    try:
+        initialize()
+        with connect() as conn:
+            conn.execute("INSERT INTO sync_runs(started_at,trade_date,status) VALUES (?,?,?)", ("now", "20260911", "success"))
+            conn.execute(
+                "INSERT INTO stock_signals(trade_date,ts_code,name,industry,score,macd,kdj_j,rsi14,boll_position,nine_turn,reasons,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("20260911", "000001.SZ", "测试自选", "银行", 80, 1, 2, 50, 0.5, 1, "[]", "test"),
+            )
+        assert add_to_watchlist("000001.SZ") is True
+        assert add_to_watchlist("000001.SZ") is False
+        result = dashboard()
+        assert [(row["ts_code"], row["name"], row["score"]) for row in result["watchlist"]] == [("000001.SZ", "测试自选", 80)]
+        assert remove_from_watchlist("000001.SZ") is True
+        assert dashboard()["watchlist"] == []
+    finally:
+        object.__setattr__(settings, "data_dir", original_data_dir)
+
+
 def test_sector_source_summary_distinguishes_failed_and_unattempted_sources():
     summary = sector_source_summary("tushare_moneyflow", [])
     assert "当日行业数据：Tushare 申万一级行业聚合 成功" in summary
@@ -146,6 +167,11 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     assert "主力净流入（大单+特大单，元）" not in html
     assert 'data-sort-type="number"' in html
     assert 'id="recommendation-table"' in html
+    assert 'id="watchlist-card"' in html
+    assert 'id="watchlist-table"' in html
+    assert "watchlist-table{max-height:333px;overflow-y:scroll}" in html
+    assert "function addToWatchlist(event,tsCode)" in html
+    assert "function removeFromWatchlist(event,tsCode)" in html
     assert "序号由同一转数、同一行业的历史 5 日胜率与中位收益计算" in html
     assert 'row.dataset.sortRow===\'true\'||row.cells.length===allHeaders.length' in html
     recommendation_headers = html.split('<table id="recommendation-table">', 1)[1].split("</thead>", 1)[0]
