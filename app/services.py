@@ -19,6 +19,8 @@ FILTER_METRICS = (
 # count is a partially written/failed batch and must be picked up by the next
 # incremental synchronization rather than treated as complete.
 MIN_VALID_DAILY_QUOTE_ROWS = 1_000
+# 单日全市场资金流完全为零意味着旧回填逻辑或数据源失败，不能视为完整。
+MIN_VALID_MONEYFLOW_ROWS = 1_000
 
 
 def format_cny(value: float | int | None, multiplier: float = 1) -> str:
@@ -154,6 +156,26 @@ def is_unavailable_daily_error(error: Exception) -> bool:
     return "无日线数据" in str(error)
 
 
+def score_signal(metrics: dict[str, float | int | None], nine_turn: int | None, main_net_inflow: float | None) -> tuple[int, list[str]]:
+    """Score momentum and funds, explicitly penalising late upward nine-turns."""
+    score, reasons = 0, []
+    for key, threshold, label in (("macd", 0, "MACD 金叉区间"), ("kdj_j", 50, "KDJ 偏强"), ("rsi14", 50, "RSI 强势")):
+        if metrics[key] is not None and metrics[key] > threshold:
+            score += 25
+            reasons.append(label)
+    if main_net_inflow is not None and main_net_inflow > 0:
+        score += 25
+        reasons.append("主力资金净流入")
+    # 上行第 8/9 转是趋势末段警报，9 转的风险更高。分数保持在 0–100。
+    if nine_turn == 8:
+        score -= 15
+        reasons.append("九转 8 高位风险")
+    elif nine_turn == 9:
+        score -= 30
+        reasons.append("九转 9 高位风险")
+    return max(score, 0), reasons
+
+
 def normalize_sync_start_date(value: str | None) -> str | None:
     """Validate a browser date input and convert it to Tushare's YYYYMMDD form."""
     if not value or not value.strip():
@@ -205,12 +227,20 @@ def sync_latest(start_date: str | None = None) -> dict:
                 "SELECT trade_date, COUNT(*) FROM daily_quotes WHERE trade_date IN (%s) GROUP BY trade_date" % ",".join("?" * len(trade_dates)),
                 trade_dates,
             ))
-        dates_to_fetch = incomplete_snapshot_dates(trade_dates, quote_counts, MIN_VALID_DAILY_QUOTE_ROWS)
+            moneyflow_counts = dict(conn.execute(
+                "SELECT trade_date, SUM(CASE WHEN ABS(COALESCE(main_net_inflow, 0)) > 0.01 THEN 1 ELSE 0 END) "
+                "FROM daily_quotes WHERE trade_date IN (%s) GROUP BY trade_date" % ",".join("?" * len(trade_dates)),
+                trade_dates,
+            ))
+        dates_to_fetch = sorted(set(
+            incomplete_snapshot_dates(trade_dates, quote_counts, MIN_VALID_DAILY_QUOTE_ROWS)
+            + incomplete_snapshot_dates(trade_dates, moneyflow_counts, MIN_VALID_MONEYFLOW_ROWS)
+        ))
         quotes = []
         unavailable_dates = set()
         for sync_date in dates_to_fetch:
             try:
-                quotes.extend(fetch_quotes(sync_date, include_moneyflow=False, include_basics=False))
+                quotes.extend(fetch_quotes(sync_date, include_moneyflow=True, include_basics=False))
             except ProviderError as exc:
                 if is_unavailable_daily_error(exc):
                     unavailable_dates.add(sync_date)
@@ -290,14 +320,7 @@ def calculate_signals(trade_date: str) -> None:
                 [r["close"] for r in rows], [r["high"] for r in rows], [r["low"] for r in rows],
                 [r["vol"] for r in rows],
             )
-            score, reasons = 0, []
-            for key, threshold, label in (("macd", 0, "MACD 金叉区间"), ("kdj_j", 50, "KDJ 偏强"), ("rsi14", 50, "RSI 强势")):
-                if v[key] > threshold:
-                    score += 25; reasons.append(label)
-            if v["nine_turn"] is not None and v["nine_turn"] >= 8:
-                score += 25; reasons.append("九转上行")
-            if rows[-1]["main_net_inflow"] > 0:
-                score += 25; reasons.append("主力资金净流入")
+            score, reasons = score_signal(v, v["nine_turn"], rows[-1]["main_net_inflow"])
             latest = rows[-1]
             conn.execute("""INSERT OR REPLACE INTO stock_signals
                 (trade_date,ts_code,name,industry,score,macd,kdj_j,rsi14,boll_position,nine_turn,bbi,bias,vr,psy,dmi,main_net_inflow,volume_ratio,turnover_rate,amount,total_mv,pe,pb,pct_chg,reasons,source)

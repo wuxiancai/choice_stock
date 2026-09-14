@@ -10,7 +10,7 @@ from .config import settings
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS daily_quotes (
   trade_date TEXT NOT NULL, ts_code TEXT NOT NULL, name TEXT, open REAL, high REAL,
-  low REAL, close REAL, pct_chg REAL, vol REAL, amount REAL, industry TEXT, turnover_rate REAL,
+  low REAL, close REAL, pct_chg REAL, vol REAL, amount REAL, main_net_inflow REAL, industry TEXT, turnover_rate REAL,
   volume_ratio REAL, total_mv REAL, pe REAL, pb REAL, source TEXT NOT NULL,
   PRIMARY KEY(trade_date, ts_code)
 );
@@ -45,7 +45,7 @@ def initialize() -> None:
         conn.executescript(SCHEMA)
         quote_columns = {row[1] for row in conn.execute("PRAGMA table_info(daily_quotes)")}
         for column, definition in {
-            "main_net_inflow": "REAL DEFAULT 0", "industry": "TEXT", "turnover_rate": "REAL",
+            "main_net_inflow": "REAL", "industry": "TEXT", "turnover_rate": "REAL",
             "volume_ratio": "REAL", "total_mv": "REAL", "pe": "REAL", "pb": "REAL",
         }.items():
             if column not in quote_columns:

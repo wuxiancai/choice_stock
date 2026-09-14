@@ -162,12 +162,16 @@ def fetch_quotes(
             raise ProviderError(f"{trade_date} 无日线数据（可能尚未收盘或无权限）")
         try:
             money = pro.moneyflow(trade_date=trade_date) if include_moneyflow else None
+            if include_moneyflow and (money is None or money.empty):
+                raise ProviderError(f"{trade_date} 个股主力资金流未返回有效数据")
             flow_map = {} if money is None else {
                 row.ts_code: tushare_main_net_inflow(row) for row in money.itertuples()
             }
-        except Exception:
-            # Tushare 权限不足时不臆造个股主力资金，保留为 0 并由运行记录可见。
-            flow_map = {}
+        except ProviderError:
+            raise
+        except Exception as exc:
+            # 资金流是研究输入；失败必须显式中止本批，而不是以零值伪造历史。
+            raise ProviderError(f"{trade_date} 个股主力资金流拉取失败：{exc}") from exc
         if name_map is None:
             names = pro.stock_basic(exchange="", list_status="L", fields="ts_code,name")
             name_map = dict(zip(names.ts_code, names.name))
@@ -196,7 +200,9 @@ def fetch_quotes(
             "industry": industry_map.get(r.ts_code),
             "open": r.open, "high": r.high, "low": r.low, "close": r.close,
             "pct_chg": r.pct_chg, "vol": r.vol, "amount": r.amount,
-            "main_net_inflow": flow_map.get(r.ts_code, 0),
+            # ``None`` means the moneyflow endpoint was unavailable or omitted;
+            # zero is a real observed value and must never be used as a stand-in.
+            "main_net_inflow": flow_map.get(r.ts_code),
             "turnover_rate": number(basic_map.get(r.ts_code), "turnover_rate"),
             "volume_ratio": number(basic_map.get(r.ts_code), "volume_ratio"),
             "total_mv": number(basic_map.get(r.ts_code), "total_mv"),
