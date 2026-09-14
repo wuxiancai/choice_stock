@@ -1,6 +1,6 @@
 from app.indicators import calculate
 from app.providers import ProviderError, SectorFetchResult, fetch_quotes, fetch_sector_history, fetch_sectors, fetch_tushare_sector_history
-from app.services import dashboard, format_cny, format_datetime, format_sector_date, format_trade_date, normalize_signal_filters, recent_system_errors, record_system_error, sector_source_summary, signal_tones, sync_latest
+from app.services import dashboard, format_cny, format_datetime, format_sector_date, format_trade_date, is_recommended_signal, normalize_signal_filters, recent_system_errors, record_system_error, sector_source_summary, signal_tones, sync_latest
 from app.config import settings
 from app.database import connect, initialize
 from jinja2 import Environment, FileSystemLoader
@@ -71,6 +71,15 @@ def test_standard_display_time_formats_date_and_shanghai_time():
 def test_signal_filters_accept_supported_metrics_and_ignore_removed_metrics():
     filters = normalize_signal_filters({"stock_code": " 000001.sz ", "min_volume_ratio": "1.2", "max_pb": "5", "min_bbi": "10", "max_dmi": "30", "min_score": "50", "max_total_mv": "1000", "min_macd": "0", "min_pct_chg": "2"})
     assert filters == {"stock_code": "000001.SZ", "min_volume_ratio": 1.2, "max_pb": 5.0, "min_bbi": 10.0, "max_dmi": 30.0}
+
+
+def test_recommendation_uses_only_early_nine_turn_with_confirmed_price_volume_and_funds():
+    signal = {"nine_turn": 2, "pct_chg": 3, "main_net_inflow": 1, "rsi14": 55, "boll_position": 0.8, "vol": 120}
+    assert is_recommended_signal(signal, [100, 100, 100, 100, 100])
+    assert not is_recommended_signal({**signal, "nine_turn": 4}, [100] * 5)
+    assert not is_recommended_signal({**signal, "main_net_inflow": 0}, [100] * 5)
+    assert not is_recommended_signal({**signal, "rsi14": 60}, [100] * 5)
+    assert not is_recommended_signal({**signal, "vol": 99}, [100] * 5)
 
 
 def test_sector_source_summary_distinguishes_failed_and_unattempted_sources():

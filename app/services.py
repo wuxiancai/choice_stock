@@ -176,6 +176,54 @@ def score_signal(metrics: dict[str, float | int | None], nine_turn: int | None, 
     return max(score, 0), reasons
 
 
+RECOMMENDATION_REASONS = "九转启动（1–3）｜涨幅 2%–7%｜主力净流入｜量能不低于近 5 日均量｜RSI<60｜未突破布林上轨"
+
+
+def is_recommended_signal(signal: dict, previous_five_volumes: list[float]) -> bool:
+    """Select early upward nine-turn candidates using only data known on the day."""
+    if signal.get("nine_turn") not in (1, 2, 3):
+        return False
+    if not (2 <= (signal.get("pct_chg") or 0) <= 7):
+        return False
+    if signal.get("main_net_inflow") is None or signal["main_net_inflow"] <= 0:
+        return False
+    if signal.get("rsi14") is None or signal["rsi14"] >= 60:
+        return False
+    if signal.get("boll_position") is None or signal["boll_position"] >= 1:
+        return False
+    current_volume = signal.get("vol")
+    return (
+        current_volume is not None
+        and len(previous_five_volumes) == 5
+        and current_volume >= sum(previous_five_volumes) / len(previous_five_volumes)
+    )
+
+
+def daily_recommendations(conn, signal_date: str) -> list[dict]:
+    """Return current early-stage candidates; no future price or later turn is used."""
+    rows = conn.execute(
+        "SELECT stock_signals.*, daily_quotes.close AS close, daily_quotes.vol AS vol "
+        "FROM stock_signals LEFT JOIN daily_quotes "
+        "ON daily_quotes.trade_date=stock_signals.trade_date AND daily_quotes.ts_code=stock_signals.ts_code "
+        "WHERE stock_signals.trade_date=? AND stock_signals.nine_turn IN (1,2,3)",
+        (signal_date,),
+    ).fetchall()
+    recommendations = []
+    for row in rows:
+        signal = dict(row)
+        volumes = [item[0] for item in conn.execute(
+            "SELECT vol FROM daily_quotes WHERE ts_code=? AND trade_date<? ORDER BY trade_date DESC LIMIT 5",
+            (signal["ts_code"], signal_date),
+        ) if item[0] is not None]
+        if is_recommended_signal(signal, volumes):
+            signal["volume_vs_5d"] = signal["vol"] / (sum(volumes) / len(volumes))
+            signal["recommendation_reasons"] = RECOMMENDATION_REASONS
+            signal["tones"] = signal_tones(signal)
+            recommendations.append(signal)
+    recommendations.sort(key=lambda row: (-(row["main_net_inflow"] or 0), -row["score"], row["ts_code"]))
+    return recommendations
+
+
 def normalize_sync_start_date(value: str | None) -> str | None:
     """Validate a browser date input and convert it to Tushare's YYYYMMDD form."""
     if not value or not value.strip():
@@ -369,8 +417,10 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
                 "WHERE " + " AND ".join(conditions) + " ORDER BY stock_signals.main_net_inflow IS NULL, stock_signals.main_net_inflow DESC, stock_signals.score DESC LIMIT 300",
                 params,
             ).fetchall()
+            recommendations = daily_recommendations(conn, signal_date)
         else:
             signals = []
+            recommendations = []
     snapshots_by_sector: dict[str, dict[str, dict]] = {}
     daily_ranks: dict[str, dict[str, int]] = {}
     for trade_date in dates:
@@ -400,5 +450,6 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
     sectors.sort(key=lambda row: (row["latest_change"] is None, -(row["latest_change"] or 0), row["sector_name"]))
     return {
         "run": dict(run) if run else None, "dates": dates, "sector_dates": dates[::-1], "sector_snapshot_dates": sector_snapshot_dates, "sectors": sectors,
-        "signals": [{**dict(row), "tones": signal_tones(dict(row))} for row in signals], "filters": filters, "system_errors": recent_system_errors(),
+        "signals": [{**dict(row), "tones": signal_tones(dict(row))} for row in signals], "recommendations": recommendations,
+        "filters": filters, "system_errors": recent_system_errors(),
     }
