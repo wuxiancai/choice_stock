@@ -1,6 +1,6 @@
 from app.indicators import calculate
 from app.providers import ProviderError, SectorFetchResult, fetch_quotes, fetch_sector_history, fetch_sectors, fetch_tushare_sector_history
-from app.services import add_to_watchlist, dashboard, format_cny, format_datetime, format_sector_date, format_trade_date, is_recommended_signal, normalize_signal_filters, rank_daily_recommendations, recent_system_errors, record_system_error, remove_from_watchlist, sector_source_summary, select_daily_recommendations, signal_tones, sync_latest
+from app.services import _recommendation_components, add_to_watchlist, dashboard, format_cny, format_datetime, format_sector_date, format_trade_date, is_recommended_signal, normalize_signal_filters, rank_daily_recommendations, recent_system_errors, record_system_error, remove_from_watchlist, sector_source_summary, select_daily_recommendations, signal_tones, sync_latest
 from app.config import settings
 from app.database import connect, initialize
 from jinja2 import Environment, FileSystemLoader
@@ -74,23 +74,38 @@ def test_signal_filters_accept_supported_metrics_and_ignore_removed_metrics():
     assert filters == {"stock_code": "000001.SZ", "min_volume_ratio": 1.2, "max_pb": 5.0, "min_bbi": 10.0, "max_dmi": 30.0}
 
 
-def test_recommendation_uses_only_early_nine_turn_with_confirmed_price_volume_and_funds():
-    signal = {"nine_turn": 2, "pct_chg": 3, "main_net_inflow": 1, "rsi14": 55, "boll_position": 0.8, "vol": 120}
+def test_recommendation_uses_only_nine_turn_three_to_five_with_confirmed_price_volume_and_funds():
+    signal = {"nine_turn": 3, "pct_chg": 3, "main_net_inflow": 1, "rsi14": 55, "boll_position": 0.8, "vol": 120}
     assert is_recommended_signal(signal, [100, 100, 100, 100, 100])
-    assert not is_recommended_signal({**signal, "nine_turn": 4}, [100] * 5)
+    assert is_recommended_signal({**signal, "nine_turn": 4}, [100] * 5)
+    assert is_recommended_signal({**signal, "nine_turn": 5}, [100] * 5)
+    assert not is_recommended_signal({**signal, "nine_turn": 2}, [100] * 5)
+    assert not is_recommended_signal({**signal, "nine_turn": 6}, [100] * 5)
     assert not is_recommended_signal({**signal, "main_net_inflow": 0}, [100] * 5)
     assert not is_recommended_signal({**signal, "rsi14": 60}, [100] * 5)
     assert not is_recommended_signal({**signal, "vol": 99}, [100] * 5)
 
 
-def test_recommendation_rank_uses_historical_five_day_win_rate_and_return_not_current_signal_score():
+def test_recommendation_weights_nine_turn_above_fund_flow_and_prefers_turn_three_to_later_turns():
+    profile = {"sample_size": 100, "win_rate": 60.0, "median_return": 1.0}
+    common = {"volume_vs_5d": 1.5, "macd": 0.3, "kdj_j": 60, "rsi14": 50, "boll_position": 0.6, "pct_chg": 4, "amount": 100_000, "score": 90}
+    turn_three = _recommendation_components({**common, "nine_turn": 3, "main_net_inflow": 300_000}, profile)
+    turn_two = _recommendation_components({**common, "nine_turn": 2, "main_net_inflow": 300_000}, profile)
+    turn_five = _recommendation_components({**common, "nine_turn": 5, "main_net_inflow": 300_000}, profile)
+
+    assert turn_three["九转"] > turn_two["九转"]
+    assert turn_three["九转"] > turn_three["资金"]
+    assert turn_three["九转"] > turn_five["九转"]
+
+
+def test_recommendation_rank_combines_the_weighted_current_setup_with_historical_profile():
     recommendations = [
-        {"ts_code": "000001.SZ", "nine_turn": 1, "industry": "电子", "score": 100, "main_net_inflow": 1000, "volume_vs_5d": 2.5, "macd": 0.4, "kdj_j": 60, "rsi14": 50, "boll_position": 0.5, "pct_chg": 4},
-        {"ts_code": "000002.SZ", "nine_turn": 3, "industry": "电子", "score": 25, "main_net_inflow": 10, "volume_vs_5d": 1, "macd": -2, "kdj_j": 110, "rsi14": 59, "boll_position": 0.95, "pct_chg": 6.8},
+        {"ts_code": "000001.SZ", "nine_turn": 3, "industry": "电子", "score": 100, "main_net_inflow": 1000, "volume_vs_5d": 2.5, "macd": 0.4, "kdj_j": 60, "rsi14": 50, "boll_position": 0.5, "pct_chg": 4},
+        {"ts_code": "000002.SZ", "nine_turn": 5, "industry": "电子", "score": 25, "main_net_inflow": 10, "volume_vs_5d": 1, "macd": -2, "kdj_j": 110, "rsi14": 59, "boll_position": 0.95, "pct_chg": 6.8},
     ]
     stats = {
-        (1, "电子"): {"sample_size": 30, "win_rate": 62.0, "median_return": 1.5, "label": "同转同行业"},
-        (1, None): {"sample_size": 100, "win_rate": 48.0, "median_return": -0.5, "label": "同转全部行业"},
+        (3, "电子"): {"sample_size": 30, "win_rate": 62.0, "median_return": 1.5, "label": "同转同行业"},
+        (3, None): {"sample_size": 100, "win_rate": 48.0, "median_return": -0.5, "label": "同转全部行业"},
         (None, None): {"sample_size": 300, "win_rate": 45.0, "median_return": -1.0, "label": "全部候选"},
     }
     ranked = rank_daily_recommendations(recommendations, stats)

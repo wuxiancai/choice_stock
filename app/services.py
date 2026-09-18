@@ -159,27 +159,53 @@ def is_unavailable_daily_error(error: Exception) -> bool:
     return "无日线数据" in str(error)
 
 
-def score_signal(metrics: dict[str, float | int | None], nine_turn: int | None, main_net_inflow: float | None) -> tuple[int, list[str]]:
-    """Score momentum and funds, explicitly penalising late upward nine-turns."""
-    score, reasons = 0, []
-    for key, threshold, label in (("macd", 0, "MACD 金叉区间"), ("kdj_j", 50, "KDJ 偏强"), ("rsi14", 50, "RSI 强势")):
-        if metrics[key] is not None and metrics[key] > threshold:
-            score += 25
-            reasons.append(label)
-    if main_net_inflow is not None and main_net_inflow > 0:
-        score += 25
-        reasons.append("主力资金净流入")
-    # 上行第 8/9 转是趋势末段警报，9 转的风险更高。分数保持在 0–100。
+NINE_TURN_SCORES = {1: 5, 2: 12, 3: 25, 4: 23, 5: 20, 6: 14, 7: 7, 8: 0, 9: 0}
+
+
+def _nine_turn_score(nine_turn: int | None) -> float:
+    """Score the product's upward 3–5 entry window; 8/9 are exhaustion risks."""
+    return float(NINE_TURN_SCORES.get(nine_turn, 0))
+
+
+def _fund_flow_score(main_net_inflow: float | None, amount: float | None) -> float:
+    """Use net inflow as a share of turnover, avoiding a large-cap absolute-value bias."""
+    if main_net_inflow is None or main_net_inflow <= 0:
+        return 0.0
+    if amount is None or amount <= 0:  # Tushare amount is thousands of RMB.
+        return 6.0
+    ratio = main_net_inflow / (amount * 1000)
+    return _band_score(ratio, ((0.015, float("inf"), 20), (0.008, 0.015, 17), (0.003, 0.008, 14), (0.001, 0.003, 10), (0, 0.001, 6)))
+
+
+def _volume_score(volume_ratio: float | None) -> float:
+    return _band_score(volume_ratio, ((1.2, 2.5, 12), (1, 1.2, 8), (2.5, 4, 9), (4, 5, 5), (0.8, 1, 3)))
+
+
+def score_signal(metrics: dict[str, float | int | None], nine_turn: int | None, main_net_inflow: float | None, quote: dict | None = None) -> tuple[int, list[str]]:
+    """Rank an after-close setup with nine-turn first and fund strength second."""
+    quote = quote or {}
+    components = {
+        "九转阶段": _nine_turn_score(nine_turn),
+        "资金强度": _fund_flow_score(main_net_inflow, quote.get("amount")),
+        "量能": _volume_score(quote.get("volume_ratio")),
+        "MACD": _band_score(metrics.get("macd"), ((0.2, float("inf"), 10), (0, 0.2, 8), (-0.2, 0, 4))),
+        "KDJ": _band_score(metrics.get("kdj_j"), ((50, 80, 6), (35, 50, 4), (80, 90, 3), (20, 35, 2))),
+        "RSI": _band_score(metrics.get("rsi14"), ((45, 58, 9), (35, 45, 6), (58, 65, 4), (30, 35, 2))),
+        "布林": _band_score(metrics.get("boll_position"), ((0.4, 0.75, 8), (0.25, 0.4, 6), (0.75, 0.9, 4), (0, 0.25, 2))),
+        "涨幅": _band_score(quote.get("pct_chg"), ((3, 5, 5), (2.5, 3, 4), (5, 6, 4), (2, 2.5, 2), (6, 7, 2))),
+        "BBI": 5 if quote.get("close") is not None and metrics.get("bbi") is not None and quote["close"] >= metrics["bbi"] else 0,
+    }
+    reasons = [label for label, value in components.items() if value > 0]
+    score = sum(components.values())
     if nine_turn == 8:
-        score -= 15
         reasons.append("九转 8 高位风险")
     elif nine_turn == 9:
-        score -= 30
+        score -= 5
         reasons.append("九转 9 高位风险")
-    return max(score, 0), reasons
+    return max(round(score), 0), reasons
 
 
-RECOMMENDATION_REASONS = "九转启动（1–3）｜涨幅 2%–7%｜主力净流入｜量能不低于近 5 日均量｜RSI<60｜未突破布林上轨"
+RECOMMENDATION_REASONS = "九转入场区间（3–5）｜涨幅 2%–7%｜主力资金净流入｜量能不低于近 5 日均量｜RSI<60｜未突破布林上轨"
 RECOMMENDATION_MIN_GROUP_SAMPLES = 12
 RECOMMENDATION_MIN_SCORE = 60
 RECOMMENDATION_MAX_CANDIDATES = 30
@@ -212,8 +238,8 @@ def remove_from_watchlist(value: str) -> bool:
 
 
 def is_recommended_signal(signal: dict, previous_five_volumes: list[float]) -> bool:
-    """Select early upward nine-turn candidates using only data known on the day."""
-    if signal.get("nine_turn") not in (1, 2, 3):
+    """Select the product's upward nine-turn 3–5 entry window with confirmation."""
+    if signal.get("nine_turn") not in (3, 4, 5):
         return False
     if not (2 <= (signal.get("pct_chg") or 0) <= 7):
         return False
@@ -232,7 +258,7 @@ def is_recommended_signal(signal: dict, previous_five_volumes: list[float]) -> b
 
 
 def _historical_candidate(rows: list[dict], index: int, nine_turn: int | None) -> dict | None:
-    if index < 20 or nine_turn not in (1, 2, 3):
+    if index < 20 or nine_turn not in (3, 4, 5):
         return None
     row = rows[index]
     if not (2 <= (row.get("pct_chg") or 0) <= 7) or (row.get("main_net_inflow") or 0) <= 0:
@@ -304,43 +330,31 @@ def _band_score(value: float | None, bands: tuple[tuple[float, float, float], ..
     return 0.0
 
 
-def _inflow_percentiles(recommendations: list[dict]) -> dict[str, float]:
-    inflows = sorted(float(row.get("main_net_inflow") or 0) for row in recommendations)
-    if len(inflows) <= 1:
-        return {row["ts_code"]: 1.0 for row in recommendations}
-    return {
-        row["ts_code"]: sum(value <= (row.get("main_net_inflow") or 0) for value in inflows) / len(inflows)
-        for row in recommendations
-    }
-
-
-def _recommendation_components(recommendation: dict, profile: dict, inflow_percentile: float) -> dict[str, float]:
+def _recommendation_components(recommendation: dict, profile: dict) -> dict[str, float]:
     """Score historical edge and each current signal on a transparent 100-point scale."""
     return {
-        "历史胜率": _clamp((profile["win_rate"] - 40) * 0.5, 0, 12),
-        "历史收益": _clamp((profile["median_return"] + 2) * 1.5, 0, 6),
-        "样本": 2 if profile["sample_size"] >= 100 else (1 if profile["sample_size"] >= 30 else 0),
-        "资金": 2 + 16 * inflow_percentile,
-        "量能": _clamp(3 + ((recommendation.get("volume_vs_5d") or 0) - 1) * 3, 0, 8),
+        "九转": _nine_turn_score(recommendation.get("nine_turn")),
+        "资金": _fund_flow_score(recommendation.get("main_net_inflow"), recommendation.get("amount")),
+        "量能": _volume_score(recommendation.get("volume_vs_5d")),
         "MACD": _band_score(recommendation.get("macd"), ((0.2, float("inf"), 10), (0, 0.2, 8), (-0.2, 0, 5), (-1, -0.2, 2))),
-        "KDJ": _band_score(recommendation.get("kdj_j"), ((50, 80, 8), (35, 50, 6), (80, 90, 5), (20, 35, 4), (-float("inf"), 20, 1), (90, float("inf"), 1))),
-        "RSI": _band_score(recommendation.get("rsi14"), ((45, 58, 8), (35, 45, 6), (58, 60, 5), (30, 35, 4), (-float("inf"), 30, 1))),
+        "KDJ": _band_score(recommendation.get("kdj_j"), ((50, 80, 6), (35, 50, 4), (80, 90, 3), (20, 35, 2), (-float("inf"), 20, 1), (90, float("inf"), 1))),
+        "RSI": _band_score(recommendation.get("rsi14"), ((45, 58, 9), (35, 45, 6), (58, 60, 4), (30, 35, 2), (-float("inf"), 30, 1))),
         "布林": _band_score(recommendation.get("boll_position"), ((0.4, 0.75, 8), (0.25, 0.4, 6), (0.75, 0.9, 5), (0, 0.25, 3), (-float("inf"), 0, 1), (0.9, float("inf"), 1))),
-        "涨幅": _band_score(recommendation.get("pct_chg"), ((3, 5, 8), (2.5, 3, 6), (5, 6, 6), (2, 2.5, 4), (6, 7, 4))),
-        "九转": {1: 6, 2: 4, 3: 2}.get(recommendation.get("nine_turn"), 0),
-        "技术": _clamp(float(recommendation.get("score") or 0) * 0.06, 0, 6),
+        "涨幅": _band_score(recommendation.get("pct_chg"), ((3, 5, 5), (2.5, 3, 4), (5, 6, 4), (2, 2.5, 2), (6, 7, 2))),
+        "历史胜率": _clamp((profile["win_rate"] - 40) * 0.125, 0, 3),
+        "历史收益": _clamp((profile["median_return"] + 2) * 0.25, 0, 1),
+        "样本": 1 if profile["sample_size"] >= 100 else (0.5 if profile["sample_size"] >= 30 else 0),
     }
 
 
 def rank_daily_recommendations(recommendations: list[dict], stats: dict[tuple[int | None, str | None], dict]) -> list[dict]:
     fallback = stats.get((None, None), {"sample_size": 0, "win_rate": 0.0, "median_return": 0.0, "label": "样本不足"})
     ranked = []
-    inflow_percentiles = _inflow_percentiles(recommendations)
     for recommendation in recommendations:
         profile = stats.get((recommendation["nine_turn"], recommendation.get("industry")))
         if not profile or profile["sample_size"] < RECOMMENDATION_MIN_GROUP_SAMPLES:
             profile = stats.get((recommendation["nine_turn"], None), fallback)
-        components = _recommendation_components(recommendation, profile, inflow_percentiles[recommendation["ts_code"]])
+        components = _recommendation_components(recommendation, profile)
         recommendation_score = round(sum(components.values()), 1)
         detail = "｜".join(f"{label}{score:.0f}" for label, score in components.items())
         ranked.append({**recommendation, "historical_win_rate": profile["win_rate"], "historical_median_return": profile["median_return"], "historical_sample_size": profile["sample_size"], "historical_basis": profile["label"], "recommendation_score": recommendation_score, "recommendation_score_detail": detail})
@@ -361,7 +375,7 @@ def daily_recommendations(conn, signal_date: str) -> list[dict]:
         "SELECT stock_signals.*, daily_quotes.close AS close, daily_quotes.vol AS vol "
         "FROM stock_signals LEFT JOIN daily_quotes "
         "ON daily_quotes.trade_date=stock_signals.trade_date AND daily_quotes.ts_code=stock_signals.ts_code "
-        "WHERE stock_signals.trade_date=? AND stock_signals.nine_turn IN (1,2,3)",
+        "WHERE stock_signals.trade_date=? AND stock_signals.nine_turn IN (3,4,5)",
         (signal_date,),
     ).fetchall()
     recommendations = []
@@ -525,8 +539,8 @@ def calculate_signals(trade_date: str) -> None:
                 [r["close"] for r in rows], [r["high"] for r in rows], [r["low"] for r in rows],
                 [r["vol"] for r in rows],
             )
-            score, reasons = score_signal(v, v["nine_turn"], rows[-1]["main_net_inflow"])
             latest = rows[-1]
+            score, reasons = score_signal(v, v["nine_turn"], latest["main_net_inflow"], dict(latest))
             conn.execute("""INSERT OR REPLACE INTO stock_signals
                 (trade_date,ts_code,name,industry,score,macd,kdj_j,rsi14,boll_position,nine_turn,bbi,bias,vr,psy,dmi,main_net_inflow,volume_ratio,turnover_rate,amount,total_mv,pe,pb,pct_chg,reasons,source)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
