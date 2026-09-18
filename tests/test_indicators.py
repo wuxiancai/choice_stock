@@ -6,6 +6,7 @@ from app.database import connect, initialize
 from jinja2 import Environment, FileSystemLoader
 from unittest.mock import patch
 import os
+from pathlib import Path
 
 
 def test_calculate_returns_all_requested_technical_metrics():
@@ -179,6 +180,10 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     recommendation_headers = html.split('<table id="recommendation-table">', 1)[1].split("</thead>", 1)[0]
     assert recommendation_headers.index("序号") < recommendation_headers.index("股票")
     assert "历史5日胜率" in recommendation_headers
+    template_source = (Path(__file__).parents[1] / "app/templates/index.html").read_text()
+    recommendation_template = template_source.split('<table id="recommendation-table">', 1)[1].split("</table>", 1)[0]
+    assert 'style="white-space:nowrap;text-align:left"' in recommendation_template
+    assert 'style="white-space:normal;text-align:left"' not in recommendation_template
     filter_section = html
     assert 'name="stock_code"' in filter_section
     for field in ("macd", "kdj_j", "rsi14", "boll_position", "pct_chg"):
