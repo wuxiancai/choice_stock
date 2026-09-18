@@ -172,6 +172,8 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     assert "watchlist-table{max-height:333px;overflow-y:scroll}" in html
     assert "function addToWatchlist(event,tsCode)" in html
     assert "function removeFromWatchlist(event,tsCode)" in html
+    assert "ascending=current==='ascending'?false:current==='descending'?true:type==='text'" in html
+    assert "dataset.sortValue||''" in html
     assert "序号由同一转数、同一行业的历史 5 日胜率与中位收益计算" in html
     assert 'row.dataset.sortRow===\'true\'||row.cells.length===allHeaders.length' in html
     recommendation_headers = html.split('<table id="recommendation-table">', 1)[1].split("</thead>", 1)[0]
