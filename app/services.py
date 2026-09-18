@@ -181,6 +181,8 @@ def score_signal(metrics: dict[str, float | int | None], nine_turn: int | None, 
 
 RECOMMENDATION_REASONS = "九转启动（1–3）｜涨幅 2%–7%｜主力净流入｜量能不低于近 5 日均量｜RSI<60｜未突破布林上轨"
 RECOMMENDATION_MIN_GROUP_SAMPLES = 12
+RECOMMENDATION_MIN_SCORE = 60
+RECOMMENDATION_MAX_CANDIDATES = 30
 TS_CODE_PATTERN = re.compile(r"^\d{6}\.(?:SZ|SH|BJ)$")
 
 
@@ -289,19 +291,68 @@ def historical_recommendation_stats(as_of_date: str) -> dict[tuple[int | None, s
     return stats
 
 
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _band_score(value: float | None, bands: tuple[tuple[float, float, float], ...]) -> float:
+    if value is None:
+        return 0.0
+    for lower, upper, score in bands:
+        if lower <= value < upper:
+            return score
+    return 0.0
+
+
+def _inflow_percentiles(recommendations: list[dict]) -> dict[str, float]:
+    inflows = sorted(float(row.get("main_net_inflow") or 0) for row in recommendations)
+    if len(inflows) <= 1:
+        return {row["ts_code"]: 1.0 for row in recommendations}
+    return {
+        row["ts_code"]: sum(value <= (row.get("main_net_inflow") or 0) for value in inflows) / len(inflows)
+        for row in recommendations
+    }
+
+
+def _recommendation_components(recommendation: dict, profile: dict, inflow_percentile: float) -> dict[str, float]:
+    """Score historical edge and each current signal on a transparent 100-point scale."""
+    return {
+        "历史胜率": _clamp((profile["win_rate"] - 40) * 0.5, 0, 12),
+        "历史收益": _clamp((profile["median_return"] + 2) * 1.5, 0, 6),
+        "样本": 2 if profile["sample_size"] >= 100 else (1 if profile["sample_size"] >= 30 else 0),
+        "资金": 2 + 16 * inflow_percentile,
+        "量能": _clamp(3 + ((recommendation.get("volume_vs_5d") or 0) - 1) * 3, 0, 8),
+        "MACD": _band_score(recommendation.get("macd"), ((0.2, float("inf"), 10), (0, 0.2, 8), (-0.2, 0, 5), (-1, -0.2, 2))),
+        "KDJ": _band_score(recommendation.get("kdj_j"), ((50, 80, 8), (35, 50, 6), (80, 90, 5), (20, 35, 4), (-float("inf"), 20, 1), (90, float("inf"), 1))),
+        "RSI": _band_score(recommendation.get("rsi14"), ((45, 58, 8), (35, 45, 6), (58, 60, 5), (30, 35, 4), (-float("inf"), 30, 1))),
+        "布林": _band_score(recommendation.get("boll_position"), ((0.4, 0.75, 8), (0.25, 0.4, 6), (0.75, 0.9, 5), (0, 0.25, 3), (-float("inf"), 0, 1), (0.9, float("inf"), 1))),
+        "涨幅": _band_score(recommendation.get("pct_chg"), ((3, 5, 8), (2.5, 3, 6), (5, 6, 6), (2, 2.5, 4), (6, 7, 4))),
+        "九转": {1: 6, 2: 4, 3: 2}.get(recommendation.get("nine_turn"), 0),
+        "技术": _clamp(float(recommendation.get("score") or 0) * 0.06, 0, 6),
+    }
+
+
 def rank_daily_recommendations(recommendations: list[dict], stats: dict[tuple[int | None, str | None], dict]) -> list[dict]:
     fallback = stats.get((None, None), {"sample_size": 0, "win_rate": 0.0, "median_return": 0.0, "label": "样本不足"})
     ranked = []
+    inflow_percentiles = _inflow_percentiles(recommendations)
     for recommendation in recommendations:
         profile = stats.get((recommendation["nine_turn"], recommendation.get("industry")))
         if not profile or profile["sample_size"] < RECOMMENDATION_MIN_GROUP_SAMPLES:
             profile = stats.get((recommendation["nine_turn"], None), fallback)
-        history_score = max(0, min(100, round(profile["win_rate"] + profile["median_return"] * 5, 2)))
-        ranked.append({**recommendation, "historical_win_rate": profile["win_rate"], "historical_median_return": profile["median_return"], "historical_sample_size": profile["sample_size"], "historical_basis": profile["label"], "recommendation_score": history_score})
+        components = _recommendation_components(recommendation, profile, inflow_percentiles[recommendation["ts_code"]])
+        recommendation_score = round(sum(components.values()), 1)
+        detail = "｜".join(f"{label}{score:.0f}" for label, score in components.items())
+        ranked.append({**recommendation, "historical_win_rate": profile["win_rate"], "historical_median_return": profile["median_return"], "historical_sample_size": profile["sample_size"], "historical_basis": profile["label"], "recommendation_score": recommendation_score, "recommendation_score_detail": detail})
     ranked.sort(key=lambda row: (-row["recommendation_score"], -row["historical_win_rate"], -row["historical_median_return"], -(row["main_net_inflow"] or 0), row["ts_code"]))
     for index, recommendation in enumerate(ranked, start=1):
         recommendation["recommendation_rank"] = index
     return ranked
+
+
+def select_daily_recommendations(ranked: list[dict]) -> list[dict]:
+    """Keep only the strongest, individually scored research candidates."""
+    return [row for row in ranked if row["recommendation_score"] >= RECOMMENDATION_MIN_SCORE][:RECOMMENDATION_MAX_CANDIDATES]
 
 
 def daily_recommendations(conn, signal_date: str) -> list[dict]:
@@ -325,7 +376,8 @@ def daily_recommendations(conn, signal_date: str) -> list[dict]:
             signal["recommendation_reasons"] = RECOMMENDATION_REASONS
             signal["tones"] = signal_tones(signal)
             recommendations.append(signal)
-    return rank_daily_recommendations(recommendations, historical_recommendation_stats(signal_date))
+    ranked = rank_daily_recommendations(recommendations, historical_recommendation_stats(signal_date))
+    return select_daily_recommendations(ranked)
 
 
 def normalize_sync_start_date(value: str | None) -> str | None:

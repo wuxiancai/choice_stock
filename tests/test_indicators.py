@@ -1,6 +1,6 @@
 from app.indicators import calculate
 from app.providers import ProviderError, SectorFetchResult, fetch_quotes, fetch_sector_history, fetch_sectors, fetch_tushare_sector_history
-from app.services import add_to_watchlist, dashboard, format_cny, format_datetime, format_sector_date, format_trade_date, is_recommended_signal, normalize_signal_filters, rank_daily_recommendations, recent_system_errors, record_system_error, remove_from_watchlist, sector_source_summary, signal_tones, sync_latest
+from app.services import add_to_watchlist, dashboard, format_cny, format_datetime, format_sector_date, format_trade_date, is_recommended_signal, normalize_signal_filters, rank_daily_recommendations, recent_system_errors, record_system_error, remove_from_watchlist, sector_source_summary, select_daily_recommendations, signal_tones, sync_latest
 from app.config import settings
 from app.database import connect, initialize
 from jinja2 import Environment, FileSystemLoader
@@ -85,8 +85,8 @@ def test_recommendation_uses_only_early_nine_turn_with_confirmed_price_volume_an
 
 def test_recommendation_rank_uses_historical_five_day_win_rate_and_return_not_current_signal_score():
     recommendations = [
-        {"ts_code": "000001.SZ", "nine_turn": 1, "industry": "电子", "score": 100, "main_net_inflow": 1},
-        {"ts_code": "000002.SZ", "nine_turn": 1, "industry": "电子", "score": 25, "main_net_inflow": 1},
+        {"ts_code": "000001.SZ", "nine_turn": 1, "industry": "电子", "score": 100, "main_net_inflow": 1000, "volume_vs_5d": 2.5, "macd": 0.4, "kdj_j": 60, "rsi14": 50, "boll_position": 0.5, "pct_chg": 4},
+        {"ts_code": "000002.SZ", "nine_turn": 3, "industry": "电子", "score": 25, "main_net_inflow": 10, "volume_vs_5d": 1, "macd": -2, "kdj_j": 110, "rsi14": 59, "boll_position": 0.95, "pct_chg": 6.8},
     ]
     stats = {
         (1, "电子"): {"sample_size": 30, "win_rate": 62.0, "median_return": 1.5, "label": "同转同行业"},
@@ -95,9 +95,18 @@ def test_recommendation_rank_uses_historical_five_day_win_rate_and_return_not_cu
     }
     ranked = rank_daily_recommendations(recommendations, stats)
     assert [row["recommendation_rank"] for row in ranked] == [1, 2]
-    assert all(row["historical_win_rate"] == 62.0 for row in ranked)
-    assert all(row["historical_median_return"] == 1.5 for row in ranked)
-    assert all(row["historical_basis"] == "同转同行业" for row in ranked)
+    assert ranked[0]["recommendation_score"] > ranked[1]["recommendation_score"] + 30
+    assert ranked[0]["historical_win_rate"] == 62.0
+    assert ranked[0]["historical_median_return"] == 1.5
+    assert ranked[0]["historical_basis"] == "同转同行业"
+    assert "资金" in ranked[0]["recommendation_score_detail"]
+
+
+def test_daily_recommendations_keep_only_the_top_thirty_that_meet_the_score_floor():
+    ranked = [{"recommendation_rank": index, "recommendation_score": 90 - index * 0.5} for index in range(1, 41)]
+    selected = select_daily_recommendations(ranked)
+    assert len(selected) == 30
+    assert [row["recommendation_rank"] for row in selected] == list(range(1, 31))
 
 
 def test_watchlist_persists_once_and_uses_the_latest_signal_for_display(tmp_path):
@@ -175,10 +184,13 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     assert "function removeFromWatchlist(event,tsCode)" in html
     assert "ascending=current==='ascending'?false:current==='descending'?true:type==='text'" in html
     assert "dataset.sortValue||''" in html
-    assert "序号由同一转数、同一行业的历史 5 日胜率与中位收益计算" in html
+    assert "仅展示综合推荐评分 ≥60 分的前 30 只" in html
     assert 'row.dataset.sortRow===\'true\'||row.cells.length===allHeaders.length' in html
     recommendation_headers = html.split('<table id="recommendation-table">', 1)[1].split("</thead>", 1)[0]
     assert recommendation_headers.index("序号") < recommendation_headers.index("股票")
+    assert "推荐评分" in recommendation_headers
+    assert "技术评分" in recommendation_headers
+    assert "评分明细" in recommendation_headers
     assert "历史5日胜率" in recommendation_headers
     template_source = (Path(__file__).parents[1] / "app/templates/index.html").read_text()
     recommendation_template = template_source.split('<table id="recommendation-table">', 1)[1].split("</table>", 1)[0]
