@@ -64,6 +64,38 @@ def format_datetime(value: str | None) -> str:
         return value
 
 
+def watchlist_added_date(value: str | None) -> str:
+    """Show the persistent watchlist timestamp as a Shanghai calendar date."""
+    if not value:
+        return "—"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(ZoneInfo(settings.timezone)).strftime("%Y-%m-%d")
+    except ValueError:
+        return "—"
+
+
+def _watchlist_performance(conn, ts_code: str, created_at: str, latest_trade_date: str) -> dict:
+    """Return holding performance from the first available close on/after adding."""
+    added_date = watchlist_added_date(created_at)
+    if added_date == "—" or not latest_trade_date:
+        return {"added_date": added_date, "holding_return": None}
+    start = conn.execute(
+        "SELECT close FROM daily_quotes WHERE ts_code=? AND trade_date>=? AND trade_date<=? AND close IS NOT NULL ORDER BY trade_date LIMIT 1",
+        (ts_code, added_date.replace("-", ""), latest_trade_date),
+    ).fetchone()
+    latest = conn.execute(
+        "SELECT close FROM daily_quotes WHERE ts_code=? AND trade_date<=? AND close IS NOT NULL ORDER BY trade_date DESC LIMIT 1",
+        (ts_code, latest_trade_date),
+    ).fetchone()
+    holding_return = None
+    if start and latest and start["close"]:
+        holding_return = round((latest["close"] / start["close"] - 1) * 100, 2)
+    return {"added_date": added_date, "holding_return": holding_return}
+
+
 def record_system_error(source: str, error: Exception | str) -> None:
     """Persist a concise, browser-safe runtime error without exposing configured secrets."""
     message = str(error)
@@ -589,7 +621,7 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
                 params,
             ).fetchall()
             recommendations = daily_recommendations(conn, signal_date)
-            watchlist = conn.execute(
+            watchlist_rows = conn.execute(
                 "SELECT watchlist.ts_code,watchlist.created_at,stock_signals.name,stock_signals.industry,"
                 "stock_signals.score,stock_signals.nine_turn,stock_signals.pct_chg,stock_signals.main_net_inflow "
                 "FROM watchlist LEFT JOIN stock_signals "
@@ -597,10 +629,14 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
                 "ORDER BY watchlist.created_at DESC",
                 (signal_date,),
             ).fetchall()
+            watchlist = [{**dict(row), **_watchlist_performance(conn, row["ts_code"], row["created_at"], signal_date)} for row in watchlist_rows]
         else:
             signals = []
             recommendations = []
-            watchlist = conn.execute("SELECT ts_code,created_at,NULL AS name,NULL AS industry,NULL AS score,NULL AS nine_turn,NULL AS pct_chg,NULL AS main_net_inflow FROM watchlist ORDER BY created_at DESC").fetchall()
+            watchlist = [
+                {**dict(row), "added_date": watchlist_added_date(row["created_at"]), "holding_return": None}
+                for row in conn.execute("SELECT ts_code,created_at,NULL AS name,NULL AS industry,NULL AS score,NULL AS nine_turn,NULL AS pct_chg,NULL AS main_net_inflow FROM watchlist ORDER BY created_at DESC").fetchall()
+            ]
     snapshots_by_sector: dict[str, dict[str, dict]] = {}
     daily_ranks: dict[str, dict[str, int]] = {}
     for trade_date in dates:

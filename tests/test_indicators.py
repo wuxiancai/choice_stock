@@ -145,6 +145,29 @@ def test_watchlist_persists_once_and_uses_the_latest_signal_for_display(tmp_path
         object.__setattr__(settings, "data_dir", original_data_dir)
 
 
+def test_watchlist_shows_shanghai_added_date_and_return_since_first_available_close(tmp_path):
+    original_data_dir = settings.data_dir
+    object.__setattr__(settings, "data_dir", tmp_path)
+    try:
+        initialize()
+        with connect() as conn:
+            conn.execute("INSERT INTO sync_runs(started_at,trade_date,status) VALUES (?,?,?)", ("now", "20260911", "success"))
+            conn.executemany(
+                "INSERT INTO daily_quotes(trade_date,ts_code,close,source) VALUES (?,?,?,?)",
+                [("20260910", "000001.SZ", 10, "test"), ("20260911", "000001.SZ", 11, "test")],
+            )
+            conn.execute(
+                "INSERT INTO stock_signals(trade_date,ts_code,name,industry,score,reasons,source) VALUES (?,?,?,?,?,?,?)",
+                ("20260911", "000001.SZ", "测试自选", "银行", 80, "[]", "test"),
+            )
+            conn.execute("INSERT INTO watchlist(ts_code,created_at) VALUES (?,?)", ("000001.SZ", "2026-09-09T18:00:00+00:00"))
+        row = dashboard()["watchlist"][0]
+        assert row["added_date"] == "2026-09-10"
+        assert row["holding_return"] == 10.0
+    finally:
+        object.__setattr__(settings, "data_dir", original_data_dir)
+
+
 def test_sector_source_summary_distinguishes_failed_and_unattempted_sources():
     summary = sector_source_summary("tushare_moneyflow", [])
     assert "当日行业数据：Tushare 申万一级行业聚合 成功" in summary
