@@ -13,14 +13,28 @@ def ema(values: list[float], period: int) -> float:
     return result
 
 
+def _ema_series(values: list[float], period: int) -> list[float]:
+    """Return EMA values so crossover and histogram direction remain auditable."""
+    if not values:
+        return []
+    alpha = 2 / (period + 1)
+    result = [values[0]]
+    for value in values[1:]:
+        result.append(value * alpha + result[-1] * (1 - alpha))
+    return result
+
+
 def calculate(
     closes: list[float], highs: list[float], lows: list[float], volumes: list[float] | None = None,
 ) -> dict[str, float | int | None]:
     if len(closes) < 26:
         raise ValueError("至少需要 26 个交易日")
-    fast = ema(closes[-35:], 12)
-    slow = ema(closes[-35:], 26)
-    macd = fast - slow
+    fast_series = _ema_series(closes, 12)
+    slow_series = _ema_series(closes, 26)
+    dif_series = [fast - slow for fast, slow in zip(fast_series, slow_series)]
+    dea_series = _ema_series(dif_series, 9)
+    histogram_series = [(dif - dea) * 2 for dif, dea in zip(dif_series, dea_series)]
+    macd_dif, macd_dea, macd_histogram = dif_series[-1], dea_series[-1], histogram_series[-1]
     rsi_gains = [max(closes[i] - closes[i - 1], 0) for i in range(-14, 0)]
     rsi_losses = [max(closes[i - 1] - closes[i], 0) for i in range(-14, 0)]
     avg_gain, avg_loss = sum(rsi_gains) / 14, sum(rsi_losses) / 14
@@ -61,6 +75,13 @@ def calculate(
     bias = (closes[-1] - bias_base) * 100 / bias_base if bias_base else None
     psy = sum(closes[index] > closes[index - 1] for index in range(len(closes) - 12, len(closes))) * 100 / 12
 
+    obv = 0.0
+    for index in range(1, len(closes)):
+        if closes[index] > closes[index - 1]:
+            obv += volumes[index] if volumes is not None else 0
+        elif closes[index] < closes[index - 1]:
+            obv -= volumes[index] if volumes is not None else 0
+
     vr = None
     if volumes is not None and len(volumes) == len(closes) and len(closes) >= 27 and all(volume is not None for volume in volumes[-27:]):
         up_volume = down_volume = 0.0
@@ -93,6 +114,9 @@ def calculate(
                 dx_values.append(abs(plus_di - minus_di) * 100 / directional_total)
     dmi = sum(dx_values[-14:]) / 14 if len(dx_values) >= 14 else None
     return {
-        "macd": macd, "rsi14": rsi, "boll_position": boll_position, "kdj_j": j, "nine_turn": nine_turn,
+        # ``macd`` remains the DIF alias for backwards-compatible display/API clients.
+        "macd": macd_dif, "macd_dif": macd_dif, "macd_dea": macd_dea, "macd_histogram": macd_histogram,
+        "ma5": sum(closes[-5:]) / 5, "ma20": sum(closes[-20:]) / 20, "obv": obv,
+        "rsi14": rsi, "boll_position": boll_position, "kdj_j": j, "nine_turn": nine_turn,
         "bbi": bbi, "bias": bias, "vr": vr, "psy": psy, "dmi": dmi,
     }

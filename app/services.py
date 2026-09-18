@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import re
 from datetime import date, datetime, timezone
-from functools import lru_cache
-from statistics import median
 from zoneinfo import ZoneInfo
 
 from .config import settings
@@ -209,37 +207,30 @@ def _fund_flow_score(main_net_inflow: float | None, amount: float | None) -> flo
     return _band_score(ratio, ((0.015, float("inf"), 20), (0.008, 0.015, 17), (0.003, 0.008, 14), (0.001, 0.003, 10), (0, 0.001, 6)))
 
 
-def _volume_score(volume_ratio: float | None) -> float:
-    return _band_score(volume_ratio, ((1.2, 2.5, 12), (1, 1.2, 8), (2.5, 4, 9), (4, 5, 5), (0.8, 1, 3)))
-
-
 def score_signal(metrics: dict[str, float | int | None], nine_turn: int | None, main_net_inflow: float | None, quote: dict | None = None) -> tuple[int, list[str]]:
-    """Rank an after-close setup with nine-turn first and fund strength second."""
+    """Score the four non-overlapping daily resonance dimensions (100 points)."""
     quote = quote or {}
+    ma5, ma20 = metrics.get("ma5"), metrics.get("ma20")
+    close = quote.get("close")
+    trend = 35 if None not in (ma5, ma20, close) and ma5 > ma20 and close >= ma20 else 0
+    dif, dea, histogram = metrics.get("macd_dif", metrics.get("macd")), metrics.get("macd_dea"), metrics.get("macd_histogram")
+    momentum = 25 if None not in (dif, dea, histogram) and dif > dea and histogram > 0 and dif >= 0 else 0
+    rsi = metrics.get("rsi14")
+    position = 20 if rsi is not None and 50 <= rsi < 70 else 0
+    volume_ratio, turnover_rate = quote.get("volume_ratio"), quote.get("turnover_rate")
+    volume = 20 if volume_ratio is not None and volume_ratio >= 1.2 and turnover_rate is not None and turnover_rate >= 3 else 0
     components = {
-        "九转阶段": _nine_turn_score(nine_turn),
-        "资金强度": _fund_flow_score(main_net_inflow, quote.get("amount")),
-        "量能": _volume_score(quote.get("volume_ratio")),
-        "MACD": _band_score(metrics.get("macd"), ((0.2, float("inf"), 10), (0, 0.2, 8), (-0.2, 0, 4))),
-        "KDJ": _band_score(metrics.get("kdj_j"), ((50, 80, 6), (35, 50, 4), (80, 90, 3), (20, 35, 2))),
-        "RSI": _band_score(metrics.get("rsi14"), ((45, 58, 9), (35, 45, 6), (58, 65, 4), (30, 35, 2))),
-        "布林": _band_score(metrics.get("boll_position"), ((0.4, 0.75, 8), (0.25, 0.4, 6), (0.75, 0.9, 4), (0, 0.25, 2))),
-        "涨幅": _band_score(quote.get("pct_chg"), ((3, 5, 5), (2.5, 3, 4), (5, 6, 4), (2, 2.5, 2), (6, 7, 2))),
-        "BBI": 5 if quote.get("close") is not None and metrics.get("bbi") is not None and quote["close"] >= metrics["bbi"] else 0,
+        "均线趋势": trend,
+        "MACD动能": momentum,
+        "RSI位置": position,
+        "成交量确认": volume,
     }
     reasons = [label for label, value in components.items() if value > 0]
-    score = sum(components.values())
-    if nine_turn == 8:
-        reasons.append("九转 8 高位风险")
-    elif nine_turn == 9:
-        score -= 5
-        reasons.append("九转 9 高位风险")
-    return max(round(score), 0), reasons
+    return round(sum(components.values())), reasons
 
 
-RECOMMENDATION_REASONS = "九转入场区间（3–5）｜涨幅 2%–7%｜主力资金净流入｜量能不低于近 5 日均量｜RSI<60｜未突破布林上轨"
-RECOMMENDATION_MIN_GROUP_SAMPLES = 12
-RECOMMENDATION_MIN_SCORE = 60
+RECOMMENDATION_REASONS = "日线四重共振已确认：均线金叉｜MACD红柱放大｜RSI低位回升｜放量及后续3日确认"
+RECOMMENDATION_MIN_SCORE = 80
 RECOMMENDATION_MAX_CANDIDATES = 30
 TS_CODE_PATTERN = re.compile(r"^\d{6}\.(?:SZ|SH|BJ)$")
 
@@ -269,161 +260,77 @@ def remove_from_watchlist(value: str) -> bool:
     return cursor.rowcount == 1
 
 
-def is_recommended_signal(signal: dict, previous_five_volumes: list[float]) -> bool:
-    """Select the product's upward nine-turn 3–5 entry window with confirmation."""
-    if signal.get("nine_turn") not in (3, 4, 5):
-        return False
-    if not (2 <= (signal.get("pct_chg") or 0) <= 7):
-        return False
-    if signal.get("main_net_inflow") is None or signal["main_net_inflow"] <= 0:
-        return False
-    if signal.get("rsi14") is None or signal["rsi14"] >= 60:
-        return False
-    if signal.get("boll_position") is None or signal["boll_position"] >= 1:
-        return False
-    current_volume = signal.get("vol")
-    return (
-        current_volume is not None
-        and len(previous_five_volumes) == 5
-        and current_volume >= sum(previous_five_volumes) / len(previous_five_volumes)
-    )
-
-
-def _historical_candidate(rows: list[dict], index: int, nine_turn: int | None) -> dict | None:
-    if index < 20 or nine_turn not in (3, 4, 5):
+def _metrics(rows: list[dict]) -> dict | None:
+    if len(rows) < 26 or any(row["close"] is None or row["high"] is None or row["low"] is None or row["vol"] is None for row in rows):
         return None
-    row = rows[index]
-    if not (2 <= (row.get("pct_chg") or 0) <= 7) or (row.get("main_net_inflow") or 0) <= 0:
+    return calculate([row["close"] for row in rows], [row["high"] for row in rows], [row["low"] for row in rows], [row["vol"] for row in rows])
+
+
+def _resonance_candidate(rows: list[dict]) -> dict | None:
+    """Confirm a setup three trading days after its MA golden-cross day."""
+    cross_index = len(rows) - 4
+    if cross_index < 26:
         return None
-    closes = [item["close"] for item in rows[index - 20:index + 1]]
-    if any(value is None for value in closes):
+    cross_metrics = _metrics(rows[:cross_index + 1])
+    previous_metrics = _metrics(rows[:cross_index])
+    current_metrics = _metrics(rows)
+    if not cross_metrics or not previous_metrics or not current_metrics:
         return None
-    gains = [max(closes[position] - closes[position - 1], 0) for position in range(7, 21)]
-    losses = [max(closes[position - 1] - closes[position], 0) for position in range(7, 21)]
-    average_gain, average_loss = sum(gains) / 14, sum(losses) / 14
-    rsi14 = 100 if average_loss == 0 else 100 - 100 / (1 + average_gain / average_loss)
-    middle = sum(closes[-20:]) / 20
-    deviation = (sum((value - middle) ** 2 for value in closes[-20:]) / 20) ** 0.5
-    upper, lower = middle + 2 * deviation, middle - 2 * deviation
-    return {**row, "nine_turn": nine_turn, "rsi14": rsi14, "boll_position": 0.5 if upper == lower else (closes[-1] - lower) / (upper - lower)}
-
-
-@lru_cache(maxsize=8)
-def historical_recommendation_stats(as_of_date: str) -> dict[tuple[int | None, str | None], dict]:
-    """Five-day outcomes of prior matching candidates only; no current-day look-ahead."""
-    outcomes: dict[tuple[int | None, str | None], list[float]] = {}
-    with connect() as conn:
-        cursor = conn.execute(
-            "SELECT trade_date,ts_code,industry,close,pct_chg,vol,amount,main_net_inflow "
-            "FROM daily_quotes WHERE trade_date<? ORDER BY ts_code,trade_date", (as_of_date,),
-        )
-        code, rows = None, []
-
-        def collect(stock_rows: list[dict]) -> None:
-            upward_run, turns = 0, []
-            for index, item in enumerate(stock_rows):
-                upward_run = upward_run + 1 if index >= 4 and item["close"] > stock_rows[index - 4]["close"] else 0
-                turns.append((upward_run - 1) % 9 + 1 if upward_run else None)
-            for index in range(20, len(stock_rows) - 5):
-                candidate = _historical_candidate(stock_rows, index, turns[index])
-                volumes = [item["vol"] for item in stock_rows[index - 5:index] if item["vol"] is not None]
-                if candidate is None or not is_recommended_signal(candidate, volumes):
-                    continue
-                five_day_return = (stock_rows[index + 5]["close"] / stock_rows[index]["close"] - 1) * 100
-                for key in ((candidate["nine_turn"], candidate.get("industry")), (candidate["nine_turn"], None), (None, None)):
-                    outcomes.setdefault(key, []).append(five_day_return)
-
-        for row in cursor:
-            item = dict(row)
-            if code is not None and item["ts_code"] != code:
-                collect(rows)
-                rows = []
-            code = item["ts_code"]
-            rows.append(item)
-        if rows:
-            collect(rows)
-    stats = {}
-    for key, values in outcomes.items():
-        label = "同转同行业" if key[1] is not None else ("同转全部行业" if key[0] is not None else "全部候选")
-        stats[key] = {"sample_size": len(values), "win_rate": round(sum(value > 0 for value in values) * 100 / len(values), 2), "median_return": round(float(median(values)), 2), "label": label}
-    return stats
-
-
-def _clamp(value: float, low: float, high: float) -> float:
-    return max(low, min(high, value))
-
-
-def _band_score(value: float | None, bands: tuple[tuple[float, float, float], ...]) -> float:
-    if value is None:
-        return 0.0
-    for lower, upper, score in bands:
-        if lower <= value < upper:
-            return score
-    return 0.0
-
-
-def _recommendation_components(recommendation: dict, profile: dict) -> dict[str, float]:
-    """Score historical edge and each current signal on a transparent 100-point scale."""
-    return {
-        "九转": _nine_turn_score(recommendation.get("nine_turn")),
-        "资金": _fund_flow_score(recommendation.get("main_net_inflow"), recommendation.get("amount")),
-        "量能": _volume_score(recommendation.get("volume_vs_5d")),
-        "MACD": _band_score(recommendation.get("macd"), ((0.2, float("inf"), 10), (0, 0.2, 8), (-0.2, 0, 5), (-1, -0.2, 2))),
-        "KDJ": _band_score(recommendation.get("kdj_j"), ((50, 80, 6), (35, 50, 4), (80, 90, 3), (20, 35, 2), (-float("inf"), 20, 1), (90, float("inf"), 1))),
-        "RSI": _band_score(recommendation.get("rsi14"), ((45, 58, 9), (35, 45, 6), (58, 60, 4), (30, 35, 2), (-float("inf"), 30, 1))),
-        "布林": _band_score(recommendation.get("boll_position"), ((0.4, 0.75, 8), (0.25, 0.4, 6), (0.75, 0.9, 5), (0, 0.25, 3), (-float("inf"), 0, 1), (0.9, float("inf"), 1))),
-        "涨幅": _band_score(recommendation.get("pct_chg"), ((3, 5, 5), (2.5, 3, 4), (5, 6, 4), (2, 2.5, 2), (6, 7, 2))),
-        "历史胜率": _clamp((profile["win_rate"] - 40) * 0.125, 0, 3),
-        "历史收益": _clamp((profile["median_return"] + 2) * 0.25, 0, 1),
-        "样本": 1 if profile["sample_size"] >= 100 else (0.5 if profile["sample_size"] >= 30 else 0),
+    if not (previous_metrics["ma5"] <= previous_metrics["ma20"] < cross_metrics["ma5"] and cross_metrics["ma5"] > previous_metrics["ma5"] and cross_metrics["ma20"] > previous_metrics["ma20"] and rows[cross_index]["close"] >= cross_metrics["ma20"]):
+        return None
+    if not (cross_metrics["macd_dif"] > cross_metrics["macd_dea"] and cross_metrics["macd_histogram"] > 0 and cross_metrics["macd_histogram"] > previous_metrics["macd_histogram"] and (cross_metrics["macd_dif"] >= 0 or previous_metrics["macd_dif"] <= 0 < cross_metrics["macd_dif"])):
+        return None
+    rsi_history = [_metrics(rows[:index + 1])["rsi14"] for index in range(max(25, cross_index - 20), len(rows)) if _metrics(rows[:index + 1])]
+    if not (50 <= current_metrics["rsi14"] < 70 and any(value < 30 for value in rsi_history)):
+        return None
+    for index in range(cross_index, len(rows)):
+        previous_volumes = [row["vol"] for row in rows[index - 5:index]]
+        multiplier = 1.2 if index == cross_index else 1
+        if len(previous_volumes) != 5 or rows[index]["vol"] < multiplier * sum(previous_volumes) / 5:
+            return None
+    obv_rising = len(rows) >= 36 and current_metrics["obv"] > _metrics(rows[:-5])["obv"] > _metrics(rows[:-10])["obv"]
+    turnover, volume_ratio = rows[-1].get("turnover_rate"), rows[-1].get("volume_ratio")
+    flow_note = "换手健康（3%–8%）" if turnover is not None and 3 <= turnover <= 8 else "换手偏离健康区间"
+    if turnover is not None and volume_ratio is not None and 2 <= volume_ratio <= 3 and turnover > 5:
+        flow_note = "量比2–3且换手>5%，主力温和介入"
+    elif turnover is not None and volume_ratio is not None and volume_ratio > 5 and turnover > 10:
+        flow_note = "量比>5且换手>10%，警惕高位出货"
+    volume_multiple = rows[cross_index]["vol"] / (sum(row["vol"] for row in rows[cross_index - 5:cross_index]) / 5)
+    components = {
+        "均线趋势": 35 if (cross_metrics["ma5"] - cross_metrics["ma20"]) / cross_metrics["ma20"] >= .01 else 30,
+        "MACD动能": 25 if cross_metrics["macd_histogram"] >= previous_metrics["macd_histogram"] * 1.2 else 20,
+        "RSI位置": 20 if current_metrics["rsi14"] < 60 else 16,
+        "成交量确认": 20 if volume_multiple >= 1.5 else 16,
     }
-
-
-def rank_daily_recommendations(recommendations: list[dict], stats: dict[tuple[int | None, str | None], dict]) -> list[dict]:
-    fallback = stats.get((None, None), {"sample_size": 0, "win_rate": 0.0, "median_return": 0.0, "label": "样本不足"})
-    ranked = []
-    for recommendation in recommendations:
-        profile = stats.get((recommendation["nine_turn"], recommendation.get("industry")))
-        if not profile or profile["sample_size"] < RECOMMENDATION_MIN_GROUP_SAMPLES:
-            profile = stats.get((recommendation["nine_turn"], None), fallback)
-        components = _recommendation_components(recommendation, profile)
-        recommendation_score = round(sum(components.values()), 1)
-        detail = "｜".join(f"{label}{score:.0f}" for label, score in components.items())
-        ranked.append({**recommendation, "historical_win_rate": profile["win_rate"], "historical_median_return": profile["median_return"], "historical_sample_size": profile["sample_size"], "historical_basis": profile["label"], "recommendation_score": recommendation_score, "recommendation_score_detail": detail})
-    ranked.sort(key=lambda row: (-row["recommendation_score"], -row["historical_win_rate"], -row["historical_median_return"], -(row["main_net_inflow"] or 0), row["ts_code"]))
-    for index, recommendation in enumerate(ranked, start=1):
-        recommendation["recommendation_rank"] = index
-    return ranked
-
-
-def select_daily_recommendations(ranked: list[dict]) -> list[dict]:
-    """Keep only the strongest, individually scored research candidates."""
-    return [row for row in ranked if row["recommendation_score"] >= RECOMMENDATION_MIN_SCORE][:RECOMMENDATION_MAX_CANDIDATES]
+    latest = {**rows[-1], **current_metrics, "golden_cross_date": rows[cross_index]["trade_date"], "volume_vs_5d": volume_multiple, "obv_status": "OBV持续抬高，资金长期留守" if obv_rising else "OBV未持续抬高，资金确认不足", "flow_note": flow_note}
+    latest["recommendation_score"] = round(sum(components.values()), 1)
+    latest["recommendation_score_detail"] = "｜".join(f"{label}{score:.0f}" for label, score in components.items())
+    latest["recommendation_reasons"] = RECOMMENDATION_REASONS
+    return latest
 
 
 def daily_recommendations(conn, signal_date: str) -> list[dict]:
-    """Return current early-stage candidates; no future price or later turn is used."""
-    rows = conn.execute(
-        "SELECT stock_signals.*, daily_quotes.close AS close, daily_quotes.vol AS vol "
-        "FROM stock_signals LEFT JOIN daily_quotes "
-        "ON daily_quotes.trade_date=stock_signals.trade_date AND daily_quotes.ts_code=stock_signals.ts_code "
-        "WHERE stock_signals.trade_date=? AND stock_signals.nine_turn IN (3,4,5)",
+    """Return only setups whose post-cross three trading-day volume confirmation exists."""
+    recommendations = []
+    # One bounded query prevents a 5,000+ stock N+1 scan every time the page loads.
+    quote_rows = conn.execute(
+        "SELECT * FROM daily_quotes WHERE trade_date IN "
+        "(SELECT DISTINCT trade_date FROM daily_quotes WHERE trade_date<=? ORDER BY trade_date DESC LIMIT 50) "
+        "ORDER BY ts_code,trade_date",
         (signal_date,),
     ).fetchall()
-    recommendations = []
-    for row in rows:
-        signal = dict(row)
-        volumes = [item[0] for item in conn.execute(
-            "SELECT vol FROM daily_quotes WHERE ts_code=? AND trade_date<? ORDER BY trade_date DESC LIMIT 5",
-            (signal["ts_code"], signal_date),
-        ) if item[0] is not None]
-        if is_recommended_signal(signal, volumes):
-            signal["volume_vs_5d"] = signal["vol"] / (sum(volumes) / len(volumes))
-            signal["recommendation_reasons"] = RECOMMENDATION_REASONS
-            signal["tones"] = signal_tones(signal)
-            recommendations.append(signal)
-    ranked = rank_daily_recommendations(recommendations, historical_recommendation_stats(signal_date))
-    return select_daily_recommendations(ranked)
+    grouped: dict[str, list[dict]] = {}
+    for row in quote_rows:
+        grouped.setdefault(row["ts_code"], []).append(dict(row))
+    for rows in grouped.values():
+        candidate = _resonance_candidate(rows)
+        if candidate and candidate["recommendation_score"] >= RECOMMENDATION_MIN_SCORE:
+            candidate["tones"] = signal_tones(candidate)
+            recommendations.append(candidate)
+    recommendations.sort(key=lambda row: (-row["recommendation_score"], row["ts_code"]))
+    for index, recommendation in enumerate(recommendations, start=1):
+        recommendation["recommendation_rank"] = index
+    return recommendations[:RECOMMENDATION_MAX_CANDIDATES]
 
 
 def normalize_sync_start_date(value: str | None) -> str | None:
@@ -551,7 +458,6 @@ def sync_latest(start_date: str | None = None) -> dict:
             conn.execute("UPDATE sync_runs SET finished_at=?,trade_date=?,status=?,source=?,message=?,quote_count=?,sector_count=? WHERE id=?",
                 (datetime.now(timezone.utc).isoformat(), trade_date, "success" if sector_complete else "partial", f"tushare,{sector_source}" if sector_source else "tushare", sector_error, len({row["ts_code"] for row in quotes if row["trade_date"] == trade_date}), len(sectors), run_id))
         calculate_signals(trade_date)
-        historical_recommendation_stats.cache_clear()
         return {"trade_date": trade_date, "quote_count": len(quotes), "sector_count": len(sectors), "status": "success" if sector_complete else "partial", "message": sector_error}
     except Exception as exc:
         with connect() as conn:
@@ -574,10 +480,10 @@ def calculate_signals(trade_date: str) -> None:
             latest = rows[-1]
             score, reasons = score_signal(v, v["nine_turn"], latest["main_net_inflow"], dict(latest))
             conn.execute("""INSERT OR REPLACE INTO stock_signals
-                (trade_date,ts_code,name,industry,score,macd,kdj_j,rsi14,boll_position,nine_turn,bbi,bias,vr,psy,dmi,main_net_inflow,volume_ratio,turnover_rate,amount,total_mv,pe,pb,pct_chg,reasons,source)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                (trade_date,ts_code,name,industry,score,macd,kdj_j,rsi14,boll_position,nine_turn,ma5,ma20,macd_dea,macd_histogram,obv,bbi,bias,vr,psy,dmi,main_net_inflow,volume_ratio,turnover_rate,amount,total_mv,pe,pb,pct_chg,reasons,source)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                 trade_date, code, latest["name"], latest["industry"], score, v["macd"], v["kdj_j"], v["rsi14"],
-                v["boll_position"], v["nine_turn"], v["bbi"], v["bias"], v["vr"], v["psy"], v["dmi"],
+                v["boll_position"], v["nine_turn"], v["ma5"], v["ma20"], v["macd_dea"], v["macd_histogram"], v["obv"], v["bbi"], v["bias"], v["vr"], v["psy"], v["dmi"],
                 latest["main_net_inflow"], latest["volume_ratio"],
                 latest["turnover_rate"], latest["amount"], latest["total_mv"], latest["pe"], latest["pb"],
                 latest["pct_chg"], json.dumps(reasons, ensure_ascii=False), "tushare",

@@ -1,6 +1,6 @@
 from app.indicators import calculate
 from app.providers import ProviderError, SectorFetchResult, fetch_quotes, fetch_sector_history, fetch_sectors, fetch_tushare_sector_history
-from app.services import _recommendation_components, add_to_watchlist, dashboard, format_cny, format_datetime, format_sector_date, format_trade_date, is_recommended_signal, normalize_signal_filters, rank_daily_recommendations, recent_system_errors, record_system_error, remove_from_watchlist, sector_source_summary, select_daily_recommendations, signal_tones, sync_latest
+from app.services import _resonance_candidate, add_to_watchlist, dashboard, format_cny, format_datetime, format_sector_date, format_trade_date, normalize_signal_filters, recent_system_errors, record_system_error, remove_from_watchlist, sector_source_summary, signal_tones, sync_latest
 from app.config import settings
 from app.database import connect, initialize
 from jinja2 import Environment, FileSystemLoader
@@ -12,7 +12,7 @@ from pathlib import Path
 def test_calculate_returns_all_requested_technical_metrics():
     closes = [10 + i * 0.1 + (0.3 if i % 2 else 0) for i in range(40)]
     metrics = calculate(closes, [x + 0.2 for x in closes], [x - 0.2 for x in closes], [1000 + i * 10 for i in range(40)])
-    assert {"macd", "kdj_j", "rsi14", "boll_position", "nine_turn", "bbi", "bias", "vr", "psy", "dmi"} <= metrics.keys()
+    assert {"macd", "macd_dif", "macd_dea", "macd_histogram", "ma5", "ma20", "obv", "kdj_j", "rsi14", "boll_position", "nine_turn", "bbi", "bias", "vr", "psy", "dmi"} <= metrics.keys()
     assert metrics["macd"] > 0
     assert 0 <= metrics["rsi14"] <= 100
     assert all(metrics[key] is not None for key in ("bbi", "bias", "vr", "psy", "dmi"))
@@ -74,54 +74,9 @@ def test_signal_filters_accept_supported_metrics_and_ignore_removed_metrics():
     assert filters == {"stock_code": "000001.SZ", "min_volume_ratio": 1.2, "max_pb": 5.0, "min_bbi": 10.0, "max_dmi": 30.0}
 
 
-def test_recommendation_uses_only_nine_turn_three_to_five_with_confirmed_price_volume_and_funds():
-    signal = {"nine_turn": 3, "pct_chg": 3, "main_net_inflow": 1, "rsi14": 55, "boll_position": 0.8, "vol": 120}
-    assert is_recommended_signal(signal, [100, 100, 100, 100, 100])
-    assert is_recommended_signal({**signal, "nine_turn": 4}, [100] * 5)
-    assert is_recommended_signal({**signal, "nine_turn": 5}, [100] * 5)
-    assert not is_recommended_signal({**signal, "nine_turn": 2}, [100] * 5)
-    assert not is_recommended_signal({**signal, "nine_turn": 6}, [100] * 5)
-    assert not is_recommended_signal({**signal, "main_net_inflow": 0}, [100] * 5)
-    assert not is_recommended_signal({**signal, "rsi14": 60}, [100] * 5)
-    assert not is_recommended_signal({**signal, "vol": 99}, [100] * 5)
-
-
-def test_recommendation_weights_nine_turn_above_fund_flow_and_prefers_turn_three_to_later_turns():
-    profile = {"sample_size": 100, "win_rate": 60.0, "median_return": 1.0}
-    common = {"volume_vs_5d": 1.5, "macd": 0.3, "kdj_j": 60, "rsi14": 50, "boll_position": 0.6, "pct_chg": 4, "amount": 100_000, "score": 90}
-    turn_three = _recommendation_components({**common, "nine_turn": 3, "main_net_inflow": 300_000}, profile)
-    turn_two = _recommendation_components({**common, "nine_turn": 2, "main_net_inflow": 300_000}, profile)
-    turn_five = _recommendation_components({**common, "nine_turn": 5, "main_net_inflow": 300_000}, profile)
-
-    assert turn_three["九转"] > turn_two["九转"]
-    assert turn_three["九转"] > turn_three["资金"]
-    assert turn_three["九转"] > turn_five["九转"]
-
-
-def test_recommendation_rank_combines_the_weighted_current_setup_with_historical_profile():
-    recommendations = [
-        {"ts_code": "000001.SZ", "nine_turn": 3, "industry": "电子", "score": 100, "main_net_inflow": 1000, "volume_vs_5d": 2.5, "macd": 0.4, "kdj_j": 60, "rsi14": 50, "boll_position": 0.5, "pct_chg": 4},
-        {"ts_code": "000002.SZ", "nine_turn": 5, "industry": "电子", "score": 25, "main_net_inflow": 10, "volume_vs_5d": 1, "macd": -2, "kdj_j": 110, "rsi14": 59, "boll_position": 0.95, "pct_chg": 6.8},
-    ]
-    stats = {
-        (3, "电子"): {"sample_size": 30, "win_rate": 62.0, "median_return": 1.5, "label": "同转同行业"},
-        (3, None): {"sample_size": 100, "win_rate": 48.0, "median_return": -0.5, "label": "同转全部行业"},
-        (None, None): {"sample_size": 300, "win_rate": 45.0, "median_return": -1.0, "label": "全部候选"},
-    }
-    ranked = rank_daily_recommendations(recommendations, stats)
-    assert [row["recommendation_rank"] for row in ranked] == [1, 2]
-    assert ranked[0]["recommendation_score"] > ranked[1]["recommendation_score"] + 30
-    assert ranked[0]["historical_win_rate"] == 62.0
-    assert ranked[0]["historical_median_return"] == 1.5
-    assert ranked[0]["historical_basis"] == "同转同行业"
-    assert "资金" in ranked[0]["recommendation_score_detail"]
-
-
-def test_daily_recommendations_keep_only_the_top_thirty_that_meet_the_score_floor():
-    ranked = [{"recommendation_rank": index, "recommendation_score": 90 - index * 0.5} for index in range(1, 41)]
-    selected = select_daily_recommendations(ranked)
-    assert len(selected) == 30
-    assert [row["recommendation_rank"] for row in selected] == list(range(1, 31))
+def test_resonance_requires_at_least_a_cross_day_and_three_following_trading_days():
+    rows = [{"trade_date": f"202601{index:02d}", "close": 10.0, "high": 10.1, "low": 9.9, "vol": 100.0} for index in range(1, 30)]
+    assert _resonance_candidate(rows) is None
 
 
 def test_watchlist_persists_once_and_uses_the_latest_signal_for_display(tmp_path):
@@ -222,14 +177,17 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     assert "function removeFromWatchlist(event,tsCode)" in html
     assert "ascending=current==='ascending'?false:current==='descending'?true:type==='text'" in html
     assert "dataset.sortValue||''" in html
-    assert "仅展示综合推荐评分 ≥60 分的前 30 只" in html
+    assert "仅展示日线四重共振评分 ≥80 分的前 30 只" in html
     assert 'row.dataset.sortRow===\'true\'||row.cells.length===allHeaders.length' in html
     recommendation_headers = html.split('<table id="recommendation-table">', 1)[1].split("</thead>", 1)[0]
     assert recommendation_headers.index("序号") < recommendation_headers.index("股票")
     assert "推荐评分" in recommendation_headers
     assert "技术评分" in recommendation_headers
+    assert "金叉日" in recommendation_headers
+    assert "DEA" in recommendation_headers
+    assert "OBV/资金确认" in recommendation_headers
     assert "评分明细" in recommendation_headers
-    assert "历史5日胜率" in recommendation_headers
+    assert "历史5日胜率" not in recommendation_headers
     template_source = (Path(__file__).parents[1] / "app/templates/index.html").read_text()
     recommendation_template = template_source.split('<table id="recommendation-table">', 1)[1].split("</table>", 1)[0]
     assert 'style="white-space:nowrap;text-align:left"' in recommendation_template

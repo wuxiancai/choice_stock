@@ -99,12 +99,11 @@ def test_sync_backfill_requests_real_moneyflow_for_every_historical_date(tmp_pat
         object.__setattr__(settings, "data_dir", original_data_dir)
 
 
-def test_nine_turn_eight_and_nine_reduce_score_with_nine_penalised_more():
-    metrics = {"macd": 1, "kdj_j": 60, "rsi14": 60}
-    score_7, _ = score_signal(metrics, 7, 1)
-    score_8, reasons_8 = score_signal(metrics, 8, 1)
-    score_9, reasons_9 = score_signal(metrics, 9, 1)
+def test_four_dimension_score_does_not_use_nine_turn_or_other_duplicate_indicators():
+    metrics = {"ma5": 11, "ma20": 10, "macd_dif": 1, "macd_dea": 0.5, "macd_histogram": 1, "rsi14": 60}
+    quote = {"close": 11, "volume_ratio": 1.5, "turnover_rate": 5}
+    score_3, reasons_3 = score_signal(metrics, 3, 1, quote)
+    score_9, reasons_9 = score_signal(metrics, 9, 1, quote)
 
-    assert score_7 > score_8 > score_9
-    assert "九转 8 高位风险" in reasons_8
-    assert "九转 9 高位风险" in reasons_9
+    assert score_3 == score_9 == 100
+    assert reasons_3 == reasons_9 == ["均线趋势", "MACD动能", "RSI位置", "成交量确认"]
