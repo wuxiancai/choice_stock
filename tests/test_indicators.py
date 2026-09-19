@@ -183,6 +183,7 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     assert recommendation_headers.index("序号") < recommendation_headers.index("股票")
     assert "推荐评分" in recommendation_headers
     assert "技术评分" in recommendation_headers
+    assert "九转" in recommendation_headers
     assert "金叉日" in recommendation_headers
     assert "DEA" in recommendation_headers
     assert "OBV/资金确认" in recommendation_headers

@@ -99,11 +99,13 @@ def test_sync_backfill_requests_real_moneyflow_for_every_historical_date(tmp_pat
         object.__setattr__(settings, "data_dir", original_data_dir)
 
 
-def test_four_dimension_score_does_not_use_nine_turn_or_other_duplicate_indicators():
+def test_score_keeps_independent_nine_turn_and_funding_dimensions():
     metrics = {"ma5": 11, "ma20": 10, "macd_dif": 1, "macd_dea": 0.5, "macd_histogram": 1, "rsi14": 60}
-    quote = {"close": 11, "volume_ratio": 1.5, "turnover_rate": 5}
-    score_3, reasons_3 = score_signal(metrics, 3, 1, quote)
-    score_9, reasons_9 = score_signal(metrics, 9, 1, quote)
+    quote = {"close": 11, "volume_ratio": 1.5, "turnover_rate": 5, "amount": 1}
+    score_3, reasons_3 = score_signal(metrics, 3, 20, quote)
+    score_9, reasons_9 = score_signal(metrics, 9, 20, quote)
 
-    assert score_3 == score_9 == 100
-    assert reasons_3 == reasons_9 == ["均线趋势", "MACD动能", "RSI位置", "成交量确认"]
+    assert score_3 == 100
+    assert score_9 == 90
+    assert reasons_3 == ["均线趋势", "MACD动能", "RSI位置", "成交量确认", "九转时点", "资金强度"]
+    assert reasons_9 == ["均线趋势", "MACD动能", "RSI位置", "成交量确认", "资金强度"]

@@ -207,29 +207,42 @@ def _fund_flow_score(main_net_inflow: float | None, amount: float | None) -> flo
     return _band_score(ratio, ((0.015, float("inf"), 20), (0.008, 0.015, 17), (0.003, 0.008, 14), (0.001, 0.003, 10), (0, 0.001, 6)))
 
 
+def _band_score(value: float | None, bands: tuple[tuple[float, float, float], ...]) -> float:
+    if value is None:
+        return 0.0
+    for lower, upper, score in bands:
+        if lower <= value < upper:
+            return score
+    return 0.0
+
+
 def score_signal(metrics: dict[str, float | int | None], nine_turn: int | None, main_net_inflow: float | None, quote: dict | None = None) -> tuple[int, list[str]]:
-    """Score the four non-overlapping daily resonance dimensions (100 points)."""
+    """Score four resonance dimensions plus independent timing and funding dimensions."""
     quote = quote or {}
     ma5, ma20 = metrics.get("ma5"), metrics.get("ma20")
     close = quote.get("close")
-    trend = 35 if None not in (ma5, ma20, close) and ma5 > ma20 and close >= ma20 else 0
+    trend = 30 if None not in (ma5, ma20, close) and ma5 > ma20 and close >= ma20 else 0
     dif, dea, histogram = metrics.get("macd_dif", metrics.get("macd")), metrics.get("macd_dea"), metrics.get("macd_histogram")
-    momentum = 25 if None not in (dif, dea, histogram) and dif > dea and histogram > 0 and dif >= 0 else 0
+    momentum = 20 if None not in (dif, dea, histogram) and dif > dea and histogram > 0 and dif >= 0 else 0
     rsi = metrics.get("rsi14")
-    position = 20 if rsi is not None and 50 <= rsi < 70 else 0
+    position = 15 if rsi is not None and 50 <= rsi < 70 else 0
     volume_ratio, turnover_rate = quote.get("volume_ratio"), quote.get("turnover_rate")
-    volume = 20 if volume_ratio is not None and volume_ratio >= 1.2 and turnover_rate is not None and turnover_rate >= 3 else 0
+    volume = 15 if volume_ratio is not None and volume_ratio >= 1.2 and turnover_rate is not None and turnover_rate >= 3 else 0
+    timing = {3: 10, 4: 8, 5: 6}.get(nine_turn, 0)
+    funding = _fund_flow_score(main_net_inflow, quote.get("amount")) / 2
     components = {
         "均线趋势": trend,
         "MACD动能": momentum,
         "RSI位置": position,
         "成交量确认": volume,
+        "九转时点": timing,
+        "资金强度": funding,
     }
     reasons = [label for label, value in components.items() if value > 0]
     return round(sum(components.values())), reasons
 
 
-RECOMMENDATION_REASONS = "日线四重共振已确认：均线金叉｜MACD红柱放大｜RSI低位回升｜放量及后续3日确认"
+RECOMMENDATION_REASONS = "日线四重共振已确认：均线金叉｜MACD红柱放大｜RSI低位回升｜放量及后续3日确认｜九转时点与主力资金确认"
 RECOMMENDATION_MIN_SCORE = 80
 RECOMMENDATION_MAX_CANDIDATES = 30
 TS_CODE_PATTERN = re.compile(r"^\d{6}\.(?:SZ|SH|BJ)$")
@@ -296,14 +309,20 @@ def _resonance_candidate(rows: list[dict]) -> dict | None:
     elif turnover is not None and volume_ratio is not None and volume_ratio > 5 and turnover > 10:
         flow_note = "量比>5且换手>10%，警惕高位出货"
     volume_multiple = rows[cross_index]["vol"] / (sum(row["vol"] for row in rows[cross_index - 5:cross_index]) / 5)
+    nine_turn = current_metrics["nine_turn"]
+    if nine_turn not in (3, 4, 5) or rows[-1]["main_net_inflow"] is None or rows[-1]["main_net_inflow"] <= 0:
+        return None
     components = {
-        "均线趋势": 35 if (cross_metrics["ma5"] - cross_metrics["ma20"]) / cross_metrics["ma20"] >= .01 else 30,
-        "MACD动能": 25 if cross_metrics["macd_histogram"] >= previous_metrics["macd_histogram"] * 1.2 else 20,
-        "RSI位置": 20 if current_metrics["rsi14"] < 60 else 16,
-        "成交量确认": 20 if volume_multiple >= 1.5 else 16,
+        "均线趋势": 30 if (cross_metrics["ma5"] - cross_metrics["ma20"]) / cross_metrics["ma20"] >= .01 else 26,
+        "MACD动能": 20 if cross_metrics["macd_histogram"] >= previous_metrics["macd_histogram"] * 1.2 else 16,
+        "RSI位置": 15 if current_metrics["rsi14"] < 60 else 12,
+        "成交量确认": 15 if volume_multiple >= 1.5 else 12,
+        "九转时点": {3: 10, 4: 8, 5: 6}[nine_turn],
+        "资金强度": _fund_flow_score(rows[-1]["main_net_inflow"], rows[-1]["amount"]) / 2,
     }
-    latest = {**rows[-1], **current_metrics, "golden_cross_date": rows[cross_index]["trade_date"], "volume_vs_5d": volume_multiple, "obv_status": "OBV持续抬高，资金长期留守" if obv_rising else "OBV未持续抬高，资金确认不足", "flow_note": flow_note}
+    latest = {**rows[-1], **current_metrics, "nine_turn": nine_turn, "golden_cross_date": rows[cross_index]["trade_date"], "volume_vs_5d": volume_multiple, "obv_status": "OBV持续抬高，资金长期留守" if obv_rising else "OBV未持续抬高，资金确认不足", "flow_note": flow_note}
     latest["recommendation_score"] = round(sum(components.values()), 1)
+    latest["score"] = latest["recommendation_score"]
     latest["recommendation_score_detail"] = "｜".join(f"{label}{score:.0f}" for label, score in components.items())
     latest["recommendation_reasons"] = RECOMMENDATION_REASONS
     return latest
