@@ -242,8 +242,8 @@ def score_signal(metrics: dict[str, float | int | None], nine_turn: int | None, 
     return round(sum(components.values())), reasons
 
 
-RECOMMENDATION_REASONS = "日线四重共振已确认：均线金叉｜MACD红柱放大｜RSI低位回升｜放量及后续3日确认｜九转时点与主力资金确认"
-RECOMMENDATION_MIN_SCORE = 80
+RECOMMENDATION_REASONS = "日线启动信号：趋势向上、MACD动能与当日资金净流入已满足；RSI、量能和九转用于确认及排序"
+RECOMMENDATION_MIN_SCORE = 70
 RECOMMENDATION_MAX_CANDIDATES = 30
 TS_CODE_PATTERN = re.compile(r"^\d{6}\.(?:SZ|SH|BJ)$")
 
@@ -280,27 +280,20 @@ def _metrics(rows: list[dict]) -> dict | None:
 
 
 def _resonance_candidate(rows: list[dict]) -> dict | None:
-    """Confirm a setup three trading days after its MA golden-cross day."""
-    cross_index = len(rows) - 4
-    if cross_index < 26:
+    """Return a current-day early-uptrend setup using only data known on that day."""
+    if len(rows) < 27:
         return None
-    cross_metrics = _metrics(rows[:cross_index + 1])
-    previous_metrics = _metrics(rows[:cross_index])
     current_metrics = _metrics(rows)
-    if not cross_metrics or not previous_metrics or not current_metrics:
+    previous_metrics = _metrics(rows[:-1])
+    if not current_metrics or not previous_metrics:
         return None
-    if not (previous_metrics["ma5"] <= previous_metrics["ma20"] < cross_metrics["ma5"] and cross_metrics["ma5"] > previous_metrics["ma5"] and cross_metrics["ma20"] > previous_metrics["ma20"] and rows[cross_index]["close"] >= cross_metrics["ma20"]):
+    ma5, ma20 = current_metrics["ma5"], current_metrics["ma20"]
+    if not (ma5 >= ma20 and rows[-1]["close"] >= ma20 and ma5 > previous_metrics["ma5"] and ma20 >= previous_metrics["ma20"] * 0.998):
         return None
-    if not (cross_metrics["macd_dif"] > cross_metrics["macd_dea"] and cross_metrics["macd_histogram"] > 0 and cross_metrics["macd_histogram"] > previous_metrics["macd_histogram"] and (cross_metrics["macd_dif"] >= 0 or previous_metrics["macd_dif"] <= 0 < cross_metrics["macd_dif"])):
+    if not (current_metrics["macd_dif"] > current_metrics["macd_dea"] and current_metrics["macd_histogram"] > 0 and current_metrics["macd_histogram"] >= previous_metrics["macd_histogram"] * 0.8):
         return None
-    rsi_history = [_metrics(rows[:index + 1])["rsi14"] for index in range(max(25, cross_index - 20), len(rows)) if _metrics(rows[:index + 1])]
-    if not (50 <= current_metrics["rsi14"] < 70 and any(value < 30 for value in rsi_history)):
+    if rows[-1].get("main_net_inflow") is None or rows[-1]["main_net_inflow"] <= 0:
         return None
-    for index in range(cross_index, len(rows)):
-        previous_volumes = [row["vol"] for row in rows[index - 5:index]]
-        multiplier = 1.2 if index == cross_index else 1
-        if len(previous_volumes) != 5 or rows[index]["vol"] < multiplier * sum(previous_volumes) / 5:
-            return None
     obv_rising = len(rows) >= 36 and current_metrics["obv"] > _metrics(rows[:-5])["obv"] > _metrics(rows[:-10])["obv"]
     turnover, volume_ratio = rows[-1].get("turnover_rate"), rows[-1].get("volume_ratio")
     flow_note = "换手健康（3%–8%）" if turnover is not None and 3 <= turnover <= 8 else "换手偏离健康区间"
@@ -308,19 +301,18 @@ def _resonance_candidate(rows: list[dict]) -> dict | None:
         flow_note = "量比2–3且换手>5%，主力温和介入"
     elif turnover is not None and volume_ratio is not None and volume_ratio > 5 and turnover > 10:
         flow_note = "量比>5且换手>10%，警惕高位出货"
-    volume_multiple = rows[cross_index]["vol"] / (sum(row["vol"] for row in rows[cross_index - 5:cross_index]) / 5)
+    volume_multiple = rows[-1]["vol"] / (sum(row["vol"] for row in rows[-6:-1]) / 5)
     nine_turn = current_metrics["nine_turn"]
-    if nine_turn not in (3, 4, 5) or rows[-1]["main_net_inflow"] is None or rows[-1]["main_net_inflow"] <= 0:
-        return None
+    rsi_recovering = 45 <= current_metrics["rsi14"] < 70 and current_metrics["rsi14"] >= previous_metrics["rsi14"]
     components = {
-        "均线趋势": 30 if (cross_metrics["ma5"] - cross_metrics["ma20"]) / cross_metrics["ma20"] >= .01 else 26,
-        "MACD动能": 20 if cross_metrics["macd_histogram"] >= previous_metrics["macd_histogram"] * 1.2 else 16,
-        "RSI位置": 15 if current_metrics["rsi14"] < 60 else 12,
-        "成交量确认": 15 if volume_multiple >= 1.5 else 12,
-        "九转时点": {3: 10, 4: 8, 5: 6}[nine_turn],
-        "资金强度": _fund_flow_score(rows[-1]["main_net_inflow"], rows[-1]["amount"]) / 2,
+        "均线趋势": 30 if (ma5 - ma20) / ma20 >= .01 else 26,
+        "MACD动能": 20 if current_metrics["macd_histogram"] >= previous_metrics["macd_histogram"] else 16,
+        "RSI转强": 15 if rsi_recovering and current_metrics["rsi14"] < 60 else (12 if rsi_recovering else 0),
+        "量能确认": 15 if volume_multiple >= 1.2 else (12 if volume_multiple >= 1 else 0),
+        "九转时点": {3: 10, 4: 8, 5: 6}.get(nine_turn, 0),
+        "资金强度": _fund_flow_score(rows[-1]["main_net_inflow"], rows[-1].get("amount")) / 2,
     }
-    latest = {**rows[-1], **current_metrics, "nine_turn": nine_turn, "golden_cross_date": rows[cross_index]["trade_date"], "volume_vs_5d": volume_multiple, "obv_status": "OBV持续抬高，资金长期留守" if obv_rising else "OBV未持续抬高，资金确认不足", "flow_note": flow_note}
+    latest = {**rows[-1], **current_metrics, "nine_turn": nine_turn, "golden_cross_date": rows[-1]["trade_date"], "volume_vs_5d": volume_multiple, "obv_status": "OBV持续抬高，资金长期留守" if obv_rising else "OBV未持续抬高，资金确认不足", "flow_note": flow_note}
     latest["recommendation_score"] = round(sum(components.values()), 1)
     latest["score"] = latest["recommendation_score"]
     latest["recommendation_score_detail"] = "｜".join(f"{label}{score:.0f}" for label, score in components.items())
@@ -329,7 +321,7 @@ def _resonance_candidate(rows: list[dict]) -> dict | None:
 
 
 def daily_recommendations(conn, signal_date: str) -> list[dict]:
-    """Return only setups whose post-cross three trading-day volume confirmation exists."""
+    """Return current-day startup setups, ranked without future trading days."""
     recommendations = []
     # One bounded query prevents a 5,000+ stock N+1 scan every time the page loads.
     quote_rows = conn.execute(

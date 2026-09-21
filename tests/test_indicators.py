@@ -74,9 +74,25 @@ def test_signal_filters_accept_supported_metrics_and_ignore_removed_metrics():
     assert filters == {"stock_code": "000001.SZ", "min_volume_ratio": 1.2, "max_pb": 5.0, "min_bbi": 10.0, "max_dmi": 30.0}
 
 
-def test_resonance_requires_at_least_a_cross_day_and_three_following_trading_days():
+def test_startup_recommendation_requires_enough_current_and_prior_trade_days():
     rows = [{"trade_date": f"202601{index:02d}", "close": 10.0, "high": 10.1, "low": 9.9, "vol": 100.0} for index in range(1, 30)]
     assert _resonance_candidate(rows) is None
+
+
+def test_startup_recommendation_uses_current_day_without_waiting_for_future_confirmation():
+    rows = [{"trade_date": f"202601{index:02d}", "close": 10.1, "high": 10.2, "low": 9.9, "vol": 100.0, "amount": 10_000.0, "main_net_inflow": 100_000.0, "turnover_rate": 4.0, "volume_ratio": 1.1} for index in range(1, 28)]
+    metrics = {
+        27: {"ma5": 10.1, "ma20": 10.0, "macd_dif": 0.2, "macd_dea": 0.1, "macd_histogram": 0.2, "rsi14": 55.0, "nine_turn": 1, "obv": 100.0},
+        26: {"ma5": 10.0, "ma20": 10.0, "macd_dif": 0.1, "macd_dea": 0.1, "macd_histogram": 0.1, "rsi14": 52.0, "nine_turn": 1, "obv": 95.0},
+        22: {"obv": 90.0},
+        17: {"obv": 80.0},
+    }
+    with patch("app.services._metrics", side_effect=lambda values: metrics[len(values)]):
+        candidate = _resonance_candidate(rows)
+    assert candidate is not None
+    assert candidate["golden_cross_date"] == "20260127"
+    assert candidate["recommendation_score"] >= 70
+    assert "RSI转强" in candidate["recommendation_score_detail"]
 
 
 def test_watchlist_persists_once_and_uses_the_latest_signal_for_display(tmp_path):
@@ -177,14 +193,14 @@ def test_dashboard_template_renders_historical_signal_with_new_nullable_fields()
     assert "function removeFromWatchlist(event,tsCode)" in html
     assert "ascending=current==='ascending'?false:current==='descending'?true:type==='text'" in html
     assert "dataset.sortValue||''" in html
-    assert "仅展示日线四重共振评分 ≥80 分的前 30 只" in html
+    assert "仅展示日线启动评分 ≥70 分的前 30 只" in html
     assert 'row.dataset.sortRow===\'true\'||row.cells.length===allHeaders.length' in html
     recommendation_headers = html.split('<table id="recommendation-table">', 1)[1].split("</thead>", 1)[0]
     assert recommendation_headers.index("序号") < recommendation_headers.index("股票")
     assert "推荐评分" in recommendation_headers
     assert "技术评分" in recommendation_headers
     assert "九转" in recommendation_headers
-    assert "金叉日" in recommendation_headers
+    assert "启动确认日" in recommendation_headers
     assert "DEA" in recommendation_headers
     assert "OBV/资金确认" in recommendation_headers
     assert "评分明细" in recommendation_headers
