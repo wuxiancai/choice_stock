@@ -189,14 +189,6 @@ def is_unavailable_daily_error(error: Exception) -> bool:
     return "无日线数据" in str(error)
 
 
-NINE_TURN_SCORES = {1: 5, 2: 12, 3: 25, 4: 23, 5: 20, 6: 14, 7: 7, 8: 0, 9: 0}
-
-
-def _nine_turn_score(nine_turn: int | None) -> float:
-    """Score the product's upward 3–5 entry window; 8/9 are exhaustion risks."""
-    return float(NINE_TURN_SCORES.get(nine_turn, 0))
-
-
 def _fund_flow_score(main_net_inflow: float | None, amount: float | None) -> float:
     """Use net inflow as a share of turnover, avoiding a large-cap absolute-value bias."""
     if main_net_inflow is None or main_net_inflow <= 0:
@@ -217,7 +209,7 @@ def _band_score(value: float | None, bands: tuple[tuple[float, float, float], ..
 
 
 def score_signal(metrics: dict[str, float | int | None], nine_turn: int | None, main_net_inflow: float | None, quote: dict | None = None) -> tuple[int, list[str]]:
-    """Score four resonance dimensions plus independent timing and funding dimensions."""
+    """Score technical and funding dimensions; nine-turn is display-only."""
     quote = quote or {}
     ma5, ma20 = metrics.get("ma5"), metrics.get("ma20")
     close = quote.get("close")
@@ -228,21 +220,19 @@ def score_signal(metrics: dict[str, float | int | None], nine_turn: int | None, 
     position = 15 if rsi is not None and 50 <= rsi < 70 else 0
     volume_ratio, turnover_rate = quote.get("volume_ratio"), quote.get("turnover_rate")
     volume = 15 if volume_ratio is not None and volume_ratio >= 1.2 and turnover_rate is not None and turnover_rate >= 3 else 0
-    timing = {3: 10, 4: 8, 5: 6}.get(nine_turn, 0)
     funding = _fund_flow_score(main_net_inflow, quote.get("amount")) / 2
     components = {
         "均线趋势": trend,
         "MACD动能": momentum,
         "RSI位置": position,
         "成交量确认": volume,
-        "九转时点": timing,
         "资金强度": funding,
     }
     reasons = [label for label, value in components.items() if value > 0]
     return round(sum(components.values())), reasons
 
 
-RECOMMENDATION_REASONS = "日线启动信号：趋势向上、MACD动能与当日资金净流入已满足；RSI、量能和九转用于确认及排序"
+RECOMMENDATION_REASONS = "日线启动信号：趋势向上、MACD动能与当日资金净流入已满足；RSI与量能用于确认及排序，九转仅展示、不参与筛选和评分"
 RECOMMENDATION_MIN_SCORE = 70
 RECOMMENDATION_MAX_CANDIDATES = 30
 TS_CODE_PATTERN = re.compile(r"^\d{6}\.(?:SZ|SH|BJ)$")
@@ -309,7 +299,6 @@ def _resonance_candidate(rows: list[dict]) -> dict | None:
         "MACD动能": 20 if current_metrics["macd_histogram"] >= previous_metrics["macd_histogram"] else 16,
         "RSI转强": 15 if rsi_recovering and current_metrics["rsi14"] < 60 else (12 if rsi_recovering else 0),
         "量能确认": 15 if volume_multiple >= 1.2 else (12 if volume_multiple >= 1 else 0),
-        "九转时点": {3: 10, 4: 8, 5: 6}.get(nine_turn, 0),
         "资金强度": _fund_flow_score(rows[-1]["main_net_inflow"], rows[-1].get("amount")) / 2,
     }
     latest = {**rows[-1], **current_metrics, "nine_turn": nine_turn, "golden_cross_date": rows[-1]["trade_date"], "volume_vs_5d": volume_multiple, "obv_status": "OBV持续抬高，资金长期留守" if obv_rising else "OBV未持续抬高，资金确认不足", "flow_note": flow_note}
