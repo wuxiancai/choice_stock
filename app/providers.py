@@ -29,7 +29,7 @@ MIN_VALID_SECTOR_ROWS = 30
 # is available to an account with 3,000 points or fewer.  Keep this declaration
 # next to the calls so a future provider addition cannot silently reintroduce a
 # higher-tier endpoint.
-TUSHARE_3000_POINT_APIS = frozenset({"trade_cal", "daily", "daily_basic", "moneyflow", "stock_basic", "index_member_all"})
+TUSHARE_3000_POINT_APIS = frozenset({"trade_cal", "daily", "daily_basic", "moneyflow", "stock_basic", "index_member_all", "adj_factor"})
 SW_L1_PAGE_SIZE = 3_000
 _EASTMONEY_HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -210,11 +210,105 @@ def fetch_quotes(
             # (TTM), not Tushare's static ``pe`` field.
             "pe": number(basic_map.get(r.ts_code), "pe_ttm"),
             "pb": number(basic_map.get(r.ts_code), "pb"),
+            "adj_factor": None,
         } for r in frame.itertuples()]
     except ProviderError:
         raise
     except Exception as exc:
         raise ProviderError(f"拉取 Tushare 日线失败：{exc}") from exc
+
+
+def fetch_market_index_quotes(start_date: str, end_date: str) -> list[dict]:
+    """Fetch CSI 300 daily bars via AKShare, without consuming Tushare points."""
+    import akshare as ak
+
+    errors = []
+    frame = None
+    source = "akshare_eastmoney"
+    for bypass_proxy in (False, True):
+        try:
+            if bypass_proxy:
+                with without_http_proxy():
+                    frame = ak.stock_zh_index_daily_em(
+                        symbol="csi000300", start_date=start_date, end_date=end_date,
+                    )
+            else:
+                frame = ak.stock_zh_index_daily_em(
+                    symbol="csi000300", start_date=start_date, end_date=end_date,
+                )
+            if frame is not None and not frame.empty:
+                break
+        except Exception as exc:
+            errors.append(str(exc))
+    if frame is None or frame.empty:
+        source = "akshare_sina"
+        try:
+            frame = ak.stock_zh_index_daily(symbol="sh000300")
+        except Exception as exc:
+            errors.append(str(exc))
+    if frame is None or frame.empty:
+        detail = errors[-1][:240] if errors else "未返回有效行情"
+        raise ProviderError(f"沪深300指数行情拉取失败：{detail}")
+    rows = []
+    for row in frame.itertuples(index=False):
+        trade_date = str(getattr(row, "date"))[:10].replace("-", "")
+        if not start_date <= trade_date <= end_date:
+            continue
+        close = float(getattr(row, "close"))
+        if not isfinite(close) or close <= 0:
+            continue
+        rows.append({
+            "trade_date": trade_date, "ts_code": "000300.SH", "name": "沪深300",
+            "open": float(row.open), "high": float(row.high), "low": float(row.low),
+            "close": close, "source": source,
+        })
+    if not rows:
+        raise ProviderError("沪深300指数行情范围内没有有效数据")
+    return rows
+
+
+def fetch_stock_metadata() -> list[dict]:
+    """Return listing dates/status for current A-share securities."""
+    pro = _ts()
+    rows = []
+    try:
+        for status in ("L", "D", "P"):
+            frame = pro.stock_basic(
+                exchange="", list_status=status,
+                fields="ts_code,name,list_date,delist_date,list_status",
+            )
+            rows.extend({
+                "ts_code": str(row.ts_code), "name": str(row.name or ""),
+                "list_date": str(row.list_date or ""), "delist_date": str(row.delist_date or ""),
+                "list_status": str(row.list_status or status),
+            } for row in frame.itertuples())
+    except Exception as exc:
+        raise ProviderError(f"股票上市状态读取失败：{exc}") from exc
+    if not rows:
+        raise ProviderError("股票上市状态未返回有效数据")
+    return rows
+
+
+def fetch_adjustment_factors(trade_date: str) -> dict[str, float]:
+    """Fetch that session's A-share adjustment factors (2,000-point endpoint)."""
+    pro = _ts()
+    try:
+        frame = pro.adj_factor(trade_date=trade_date)
+    except Exception as exc:
+        raise ProviderError(f"{trade_date} 复权因子拉取失败：{exc}") from exc
+    if frame is None or frame.empty:
+        raise ProviderError(f"{trade_date} 复权因子未返回有效数据")
+    factors = {}
+    for row in frame.itertuples():
+        try:
+            factor = float(row.adj_factor)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if isfinite(factor) and factor > 0:
+            factors[str(row.ts_code)] = factor
+    if len(factors) < 1_000:
+        raise ProviderError(f"{trade_date} 复权因子仅返回{len(factors)}条，覆盖不足")
+    return factors
 
 
 def _fetch_sector_frame():

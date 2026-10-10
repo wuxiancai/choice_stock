@@ -11,7 +11,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS daily_quotes (
   trade_date TEXT NOT NULL, ts_code TEXT NOT NULL, name TEXT, open REAL, high REAL,
   low REAL, close REAL, pct_chg REAL, vol REAL, amount REAL, main_net_inflow REAL, industry TEXT, turnover_rate REAL,
-  volume_ratio REAL, total_mv REAL, pe REAL, pb REAL, source TEXT NOT NULL,
+  volume_ratio REAL, total_mv REAL, pe REAL, pb REAL, adj_factor REAL, source TEXT NOT NULL,
   PRIMARY KEY(trade_date, ts_code)
 );
 CREATE TABLE IF NOT EXISTS sector_snapshots (
@@ -44,6 +44,15 @@ CREATE TABLE IF NOT EXISTS manual_recommendations (
   trade_date TEXT NOT NULL, ts_code TEXT NOT NULL, created_at TEXT NOT NULL,
   PRIMARY KEY(trade_date, ts_code)
 );
+CREATE TABLE IF NOT EXISTS market_index_quotes (
+  trade_date TEXT NOT NULL, ts_code TEXT NOT NULL, name TEXT NOT NULL,
+  open REAL, high REAL, low REAL, close REAL NOT NULL, source TEXT NOT NULL,
+  PRIMARY KEY(trade_date, ts_code)
+);
+CREATE TABLE IF NOT EXISTS stock_metadata (
+  ts_code TEXT PRIMARY KEY, name TEXT, list_date TEXT, delist_date TEXT,
+  list_status TEXT, updated_at TEXT NOT NULL
+);
 """
 
 
@@ -55,6 +64,7 @@ def initialize() -> None:
         for column, definition in {
             "main_net_inflow": "REAL", "industry": "TEXT", "turnover_rate": "REAL",
             "volume_ratio": "REAL", "total_mv": "REAL", "pe": "REAL", "pb": "REAL",
+            "adj_factor": "REAL",
         }.items():
             if column not in quote_columns:
                 conn.execute(f"ALTER TABLE daily_quotes ADD COLUMN {column} {definition}")

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+from bisect import bisect_right
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from .config import settings
 from .database import connect, initialize
 from .indicators import calculate
-from .providers import MIN_VALID_SECTOR_ROWS, ProviderError, fetch_quotes, fetch_sector_history, fetch_sectors, recent_trade_dates, trade_dates_since
+from .providers import MIN_VALID_SECTOR_ROWS, ProviderError, fetch_adjustment_factors, fetch_market_index_quotes, fetch_quotes, fetch_sector_history, fetch_sectors, fetch_stock_metadata, recent_trade_dates, trade_dates_since
 
 
 FILTER_METRICS = (
@@ -235,6 +236,8 @@ def score_signal(metrics: dict[str, float | int | None], nine_turn: int | None, 
 RECOMMENDATION_REASONS = "日线启动信号：趋势向上、MACD动能与当日资金净流入已满足；RSI与量能用于确认及排序，九转仅展示、不参与筛选和评分"
 RECOMMENDATION_MIN_SCORE = 70
 RECOMMENDATION_MAX_CANDIDATES = 30
+BREAKOUT_MAX_CANDIDATES = 10
+_BREAKOUT_RESULT_CACHE: dict[tuple[str, int], tuple[list[dict], dict]] = {}
 TS_CODE_PATTERN = re.compile(r"^\d{6}\.(?:SZ|SH|BJ)$")
 
 
@@ -333,6 +336,193 @@ def daily_recommendations(conn, signal_date: str) -> list[dict]:
     return recommendations[:RECOMMENDATION_MAX_CANDIDATES]
 
 
+def _market_environment(index_rows: list[dict]) -> dict:
+    """Classify the benchmark using only index observations on/before signal date."""
+    if len(index_rows) < 273:
+        return {"mode": "暂停开仓", "reason": "沪深300历史不足273个交易日，无法计算一年波动率分位"}
+    closes = [row["close"] for row in index_rows]
+    ma20, ma60 = sum(closes[-20:]) / 20, sum(closes[-60:]) / 60
+    from math import log
+    daily_returns = [log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+    rolling_volatility = []
+    for end in range(20, len(daily_returns) + 1):
+        sample = daily_returns[end - 20:end]
+        mean = sum(sample) / 20
+        rolling_volatility.append((sum((value - mean) ** 2 for value in sample) / 19) ** 0.5 * (252 ** 0.5))
+    if len(rolling_volatility) < 253:
+        return {"mode": "暂停开仓", "reason": "沪深300一年波动率样本不足，无法确认是否处于最高10%"}
+    latest_vol = rolling_volatility[-1]
+    threshold = sorted(rolling_volatility[-253:-1])[int(252 * .9)]
+    if latest_vol >= threshold:
+        return {"mode": "暂停开仓", "reason": "沪深30020日实现波动率位于过去一年最高10%"}
+    if closes[-1] > ma20 > ma60:
+        return {"mode": "正常开仓", "reason": "沪深300收盘高于MA20且MA20高于MA60", "risk_scale": 1.0, "limit": BREAKOUT_MAX_CANDIDATES}
+    if closes[-1] > ma60:
+        return {"mode": "谨慎开仓", "reason": "沪深300高于MA60但未满足正常开仓趋势", "risk_scale": .5, "limit": 3}
+    return {"mode": "暂停开仓", "reason": "沪深300收盘不高于MA60"}
+
+
+def daily_breakout_recommendations(conn, signal_date: str) -> tuple[list[dict], dict]:
+    """Additional 20-day breakout/pullback screen; never changes the legacy startup list."""
+    latest_run = conn.execute("SELECT COALESCE(MAX(id),0) FROM sync_runs").fetchone()[0]
+    cache_key = (signal_date, int(latest_run))
+    if cache_key in _BREAKOUT_RESULT_CACHE:
+        return _BREAKOUT_RESULT_CACHE[cache_key]
+    result = _calculate_daily_breakout_recommendations(conn, signal_date)
+    _BREAKOUT_RESULT_CACHE[cache_key] = result
+    while len(_BREAKOUT_RESULT_CACHE) > 4:
+        _BREAKOUT_RESULT_CACHE.pop(next(iter(_BREAKOUT_RESULT_CACHE)))
+    return result
+
+
+def _calculate_daily_breakout_recommendations(conn, signal_date: str) -> tuple[list[dict], dict]:
+    index_rows = [dict(row) for row in conn.execute(
+        "SELECT * FROM market_index_quotes WHERE ts_code='000300.SH' AND trade_date<=? ORDER BY trade_date", (signal_date,),
+    )]
+    risk_note = "最近120个交易日的个股价格已复权；财报审计、逾期债务、重大诉讼、监管立案及盘口可成交数据未接入，候选须人工核验；本表仅为技术候选"
+    if not index_rows or index_rows[-1]["trade_date"] != signal_date:
+        return [], {"mode": "暂停开仓", "reason": "沪深300指数行情没有覆盖信号交易日", "risk_note": risk_note}
+    environment = _market_environment(index_rows)
+    environment.setdefault("risk_note", risk_note)
+    if environment["mode"] == "暂停开仓":
+        return [], environment
+    market_dates = [row[0] for row in conn.execute(
+        "SELECT DISTINCT trade_date FROM daily_quotes WHERE trade_date<=? ORDER BY trade_date", (signal_date,),
+    )]
+    if len(market_dates) < 120:
+        return [], {"mode": "暂停开仓", "reason": "全市场日线不足120个交易日", "risk_note": risk_note}
+    quote_rows = conn.execute(
+        "SELECT * FROM daily_quotes WHERE trade_date IN (SELECT DISTINCT trade_date FROM daily_quotes WHERE trade_date<=? ORDER BY trade_date DESC LIMIT 120) ORDER BY ts_code,trade_date", (signal_date,),
+    )
+    grouped: dict[str, list[dict]] = {}
+    for row in quote_rows:
+        grouped.setdefault(row["ts_code"], []).append(dict(row))
+    metadata_rows = conn.execute("SELECT * FROM stock_metadata").fetchall()
+    metadata = {row["ts_code"]: dict(row) for row in metadata_rows}
+    if not metadata:
+        return [], {"mode": "暂停开仓", "reason": "上市日期与证券状态未同步，无法验证120个交易日门槛", "risk_note": risk_note}
+    benchmark_by_date = {row["trade_date"]: row["close"] for row in index_rows}
+    market_returns = {}
+    for code, rows in grouped.items():
+        by_date = {row["trade_date"]: row for row in rows}
+        if len(rows) < 120 or rows[-1]["trade_date"] != signal_date:
+            continue
+        price_rows = rows[-120:]
+        if any(row.get("adj_factor") is None or row.get("close") is None for row in price_rows):
+            continue
+        if not all(by_date.get(day) and by_date[day]["close"] is not None for day in market_dates[-61:]):
+            continue
+        bench_now, bench_60 = benchmark_by_date.get(signal_date), benchmark_by_date.get(market_dates[-61])
+        if bench_now and bench_60:
+            adjusted_closes = [row["close"] * row["adj_factor"] for row in price_rows]
+            market_returns[code] = adjusted_closes[-1] / adjusted_closes[-61] - 1
+    ordered_returns = sorted(market_returns.values())
+    percentile_by_code = {}
+    for code, value in market_returns.items():
+        percentile_by_code[code] = bisect_right(ordered_returns, value) / len(ordered_returns) * 100
+    benchmark_20 = None
+    if len(index_rows) >= 21:
+        benchmark_20 = index_rows[-1]["close"] / index_rows[-21]["close"] - 1
+    candidates = []
+    missing_risk_source = risk_note
+    for code, rows in grouped.items():
+        meta = metadata.get(code)
+        if not meta or not code.endswith((".SH", ".SZ")):
+            continue
+        name = (rows[-1].get("name") or meta.get("name") or "").upper()
+        if "ST" in name or "退" in name or len(rows) < 120 or rows[-1]["trade_date"] != signal_date:
+            continue
+        list_date = meta.get("list_date") or ""
+        delist_date = meta.get("delist_date") or ""
+        if not list_date or list_date > signal_date or (delist_date and delist_date <= signal_date) or sum(day >= list_date for day in market_dates) < 120:
+            continue
+        by_date = {row["trade_date"]: row for row in rows}
+        recent_dates = market_dates[-20:]
+        valid = [by_date[d] for d in recent_dates if d in by_date and by_date[d].get("amount") is not None and by_date[d].get("amount") > 0]
+        if len(valid) < 18:
+            continue
+        amounts = sorted(row["amount"] for row in valid)  # Tushare amount is thousand RMB.
+        average_amount = sum(amounts) / len(amounts)
+        median_amount = amounts[len(amounts) // 2] if len(amounts) % 2 else (amounts[len(amounts)//2-1] + amounts[len(amounts)//2]) / 2
+        if average_amount < 100_000 or median_amount < 50_000:
+            continue
+        price_rows = rows[-120:]
+        if any(row.get("adj_factor") is None or row.get("adj_factor") <= 0 or row.get("close") is None or row.get("high") is None or row.get("low") is None or row.get("vol") is None for row in price_rows):
+            continue
+        closes = [row["close"] * row["adj_factor"] for row in price_rows]
+        highs = [row["high"] * row["adj_factor"] for row in price_rows]
+        lows = [row["low"] * row["adj_factor"] for row in price_rows]
+        current = rows[-1]
+        def one_price_limit(row: dict) -> bool:
+            values = [row.get(field) for field in ("open", "high", "low", "close")]
+            pct_chg = row.get("pct_chg")
+            return pct_chg is not None and abs(pct_chg) >= 4.5 and all(value is not None for value in values) and max(values) - min(values) <= max(abs(values[-1]) * 1e-6, 1e-6)
+        if one_price_limit(current):
+            continue
+        if len(rows) >= 3 and one_price_limit(rows[-2]) and one_price_limit(rows[-3]):
+            continue
+        close = closes[-1]
+        ma20, ma60 = sum(closes[-20:]) / 20, sum(closes[-60:]) / 60
+        ma20_prior = sum(closes[-25:-5]) / 20
+        if not (close > ma20 > ma60 and ma20 > ma20_prior):
+            continue
+        bench_start20 = benchmark_by_date.get(market_dates[-21])
+        if benchmark_20 is None or bench_start20 is None:
+            continue
+        rs20 = close / closes[-21] - 1 - benchmark_20
+        if rs20 <= 0 or percentile_by_code.get(code, 0) < 40:
+            continue
+        metric = calculate(closes, highs, lows, [row["vol"] for row in price_rows])
+        if not (metric["macd_dif"] > metric["macd_dea"] or 50 <= metric["rsi14"] <= 72):
+            continue
+        if close / ma20 - 1 > .10 or current.get("pct_chg") is None or current["pct_chg"] > 7:
+            continue
+        # Locate a confirmed 20-day closing-price breakout today, or a five-session
+        # retest that has reclaimed its breakout level on contracting turnover.
+        setup = None
+        latest_index = len(price_rows) - 1
+        for breakout_index in range(max(20, latest_index - 4), latest_index + 1):
+            prior_closes = closes[breakout_index - 20:breakout_index]
+            prior_amounts = [r.get("amount") for r in price_rows[breakout_index - 20:breakout_index] if r.get("amount") is not None and r["amount"] > 0]
+            if len(prior_closes) != 20 or len(prior_amounts) < 18:
+                continue
+            level = max(prior_closes)
+            breakout_day = price_rows[breakout_index]
+            is_breakout = closes[breakout_index] > level and breakout_day.get("amount") is not None and breakout_day["amount"] >= 1.3 * (sum(prior_amounts) / len(prior_amounts))
+            if not is_breakout:
+                continue
+            if breakout_index == latest_index:
+                setup = ("放量突破", level, min(lows[-5:-1]), max(highs[-60:-1]))
+                break
+            between = price_rows[breakout_index + 1:latest_index + 1]
+            retested = any(row["close"] <= level for row in between[:-1])
+            if retested and close > level and current.get("amount") is not None and current["amount"] < .8 * breakout_day["amount"]:
+                setup = ("突破回踩收复", level, min(row["low"] for row in between), max(highs[-60:-1]))
+                break
+        if not setup:
+            continue
+        setup_name, breakout_level, stop, target = setup
+        if stop is None or target is None or close <= stop:
+            continue
+        risk = close - stop
+        reward = target - close
+        if risk <= 0 or reward / risk < 2:
+            continue
+        score = round(min(25, (close / ma60 - 1) * 125) + min(25, max(0, rs20) * 250) + min(25, percentile_by_code.get(code, 0) * .25) + (25 if setup_name == "放量突破" else 20), 1)
+        candidates.append({**current, "name": current.get("name") or name, "close": close, "nine_turn": metric["nine_turn"],
+            "recommendation_score": score, "recommendation_score_detail": f"趋势{min(25, (close / ma60 - 1) * 125):.1f}｜相对强度{min(25, max(0, rs20) * 250):.1f}｜全市场60日强度{min(25, percentile_by_code.get(code, 0) * .25):.1f}｜形态{25 if setup_name == '放量突破' else 20}",
+            "setup_name": setup_name, "breakout_level": breakout_level, "stop_price": stop, "target_price": target,
+            "risk_reward": reward / risk, "risk_note": missing_risk_source, "risk_scale": environment.get("risk_scale", 1.0),
+            "rs20": rs20 * 100, "rs60_percentile": percentile_by_code.get(code), "ma20": ma20})
+    candidates.sort(key=lambda row: (-row["recommendation_score"], row["ts_code"]))
+    limit = environment.get("limit", BREAKOUT_MAX_CANDIDATES)
+    selected = candidates[:limit]
+    for index, row in enumerate(selected, 1):
+        row["recommendation_rank"] = index
+    environment["risk_note"] = missing_risk_source
+    return selected, environment
+
+
 def normalize_sync_start_date(value: str | None) -> str | None:
     """Validate a browser date input and convert it to Tushare's YYYYMMDD form."""
     if not value or not value.strip():
@@ -412,6 +602,43 @@ def sync_latest(start_date: str | None = None) -> dict:
         trade_date = available_dates[-1]
         # 最新日额外获取主力资金，覆盖前面的纯历史日线记录。
         quotes.extend(fetch_quotes(trade_date, include_moneyflow=True))
+        strategy_warnings = []
+        try:
+            index_start = f"{int(trade_date[:4]) - 2}0101"
+            index_rows = fetch_market_index_quotes(index_start, trade_date)
+            with connect() as conn:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO market_index_quotes(trade_date,ts_code,name,open,high,low,close,source) VALUES (:trade_date,:ts_code,:name,:open,:high,:low,:close,:source)",
+                    index_rows,
+                )
+        except Exception as exc:
+            strategy_warnings.append(str(exc))
+            record_system_error("sync_latest.market_index", exc)
+        try:
+            metadata = fetch_stock_metadata()
+            with connect() as conn:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO stock_metadata(ts_code,name,list_date,delist_date,list_status,updated_at) VALUES (:ts_code,:name,:list_date,:delist_date,:list_status,:updated_at)",
+                    [{**row, "updated_at": datetime.now(timezone.utc).isoformat()} for row in metadata],
+                )
+        except Exception as exc:
+            strategy_warnings.append(str(exc))
+            record_system_error("sync_latest.stock_metadata", exc)
+        factor_dates = available_dates[-120:]
+        with connect() as conn:
+            factor_counts = dict(conn.execute(
+                "SELECT trade_date,COUNT(adj_factor) FROM daily_quotes WHERE trade_date IN (%s) GROUP BY trade_date" % ",".join("?" * len(factor_dates)),
+                factor_dates,
+            ))
+        adjustment_factors = {}
+        for factor_date in factor_dates:
+            if factor_counts.get(factor_date, 0) >= MIN_VALID_DAILY_QUOTE_ROWS:
+                continue
+            try:
+                adjustment_factors[factor_date] = fetch_adjustment_factors(factor_date)
+            except ProviderError as exc:
+                strategy_warnings.append(str(exc))
+                record_system_error("sync_latest.adjustment_factors", exc)
         sectors, sector_errors, sector_source = [], [], ""
         current_sector_rows = []
         sector_trade_dates = available_dates[-5:]
@@ -440,12 +667,19 @@ def sync_latest(start_date: str | None = None) -> dict:
         except ProviderError as exc:
             sector_errors.append(str(exc))
             record_system_error("sync_latest.sectors", exc)
+        for quote in quotes:
+            quote.setdefault("adj_factor", None)
         with connect() as conn:
             if current_sector_rows:
                 # A new current snapshot replaces any older fallback taxonomy for
                 # this date, so five-day matrix rows remain comparable by industry.
                 conn.execute("DELETE FROM sector_snapshots WHERE trade_date=?", (trade_date,))
-            conn.executemany("""INSERT OR REPLACE INTO daily_quotes (trade_date,ts_code,name,open,high,low,close,pct_chg,vol,amount,industry,turnover_rate,volume_ratio,total_mv,pe,pb,source,main_net_inflow) VALUES (:trade_date,:ts_code,:name,:open,:high,:low,:close,:pct_chg,:vol,:amount,:industry,:turnover_rate,:volume_ratio,:total_mv,:pe,:pb,'tushare',:main_net_inflow)""", quotes)
+            conn.executemany("""INSERT OR REPLACE INTO daily_quotes (trade_date,ts_code,name,open,high,low,close,pct_chg,vol,amount,industry,turnover_rate,volume_ratio,total_mv,pe,pb,adj_factor,source,main_net_inflow) VALUES (:trade_date,:ts_code,:name,:open,:high,:low,:close,:pct_chg,:vol,:amount,:industry,:turnover_rate,:total_mv,:pe,:pb,:adj_factor,'tushare',:main_net_inflow)""", quotes)
+            for factor_date, factors in adjustment_factors.items():
+                conn.executemany(
+                    "UPDATE daily_quotes SET adj_factor=? WHERE trade_date=? AND ts_code=?",
+                    [(factor, factor_date, ts_code) for ts_code, factor in factors.items()],
+                )
             conn.executemany("""INSERT OR REPLACE INTO sector_snapshots (trade_date,sector_code,sector_name,pct_chg,amount,main_net_inflow,source) VALUES (:trade_date,:sector_code,:sector_name,:pct_chg,:amount,:main_net_inflow,:source)""", sectors)
             completed_sector_dates = {
                 row[0] for row in conn.execute(
@@ -453,7 +687,7 @@ def sync_latest(start_date: str | None = None) -> dict:
                     [*sector_trade_dates, MIN_VALID_SECTOR_ROWS],
                 )
             }
-            sector_error = "；".join(sector_errors)
+            sector_error = "；".join([*sector_errors, *strategy_warnings])
             sector_complete = set(sector_trade_dates) <= completed_sector_dates
             conn.execute("UPDATE sync_runs SET finished_at=?,trade_date=?,status=?,source=?,message=?,quote_count=?,sector_count=? WHERE id=?",
                 (datetime.now(timezone.utc).isoformat(), trade_date, "success" if sector_complete else "partial", f"tushare,{sector_source}" if sector_source else "tushare", sector_error, len({row["ts_code"] for row in quotes if row["trade_date"] == trade_date}), len(sectors), run_id))
@@ -527,6 +761,7 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
                 params,
             ).fetchall()
             recommendations = daily_recommendations(conn, signal_date)
+            breakout_recommendations, breakout_environment = daily_breakout_recommendations(conn, signal_date)
             watchlist_rows = conn.execute(
                 "SELECT watchlist.ts_code,watchlist.created_at,stock_signals.name,stock_signals.industry,"
                 "stock_signals.score,stock_signals.nine_turn,stock_signals.pct_chg,stock_signals.main_net_inflow "
@@ -539,6 +774,8 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
         else:
             signals = []
             recommendations = []
+            breakout_recommendations = []
+            breakout_environment = {"mode": "暂停开仓", "reason": "暂无已同步交易日"}
             watchlist = [
                 {**dict(row), "added_date": watchlist_added_date(row["created_at"]), "holding_return": None}
                 for row in conn.execute("SELECT ts_code,created_at,NULL AS name,NULL AS industry,NULL AS score,NULL AS nine_turn,NULL AS pct_chg,NULL AS main_net_inflow FROM watchlist ORDER BY created_at DESC").fetchall()
@@ -573,6 +810,7 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
     return {
         "run": dict(run) if run else None, "dates": dates, "sector_dates": dates[::-1], "sector_snapshot_dates": sector_snapshot_dates, "sectors": sectors,
         "signals": [{**dict(row), "tones": signal_tones(dict(row))} for row in signals], "recommendations": recommendations,
+        "breakout_recommendations": breakout_recommendations, "breakout_environment": breakout_environment,
         "watchlist": [{**dict(row), "tones": signal_tones(dict(row))} for row in watchlist],
         "filters": filters, "system_errors": recent_system_errors(),
     }
