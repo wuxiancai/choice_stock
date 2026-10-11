@@ -741,7 +741,10 @@ def calculate_signals(trade_date: str) -> None:
 
 def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
     initialize()
-    filters = normalize_signal_filters(raw_filters or {})
+    raw_filters = raw_filters or {}
+    filters = normalize_signal_filters(raw_filters)
+    filter_keys = {"stock_code", *(f"{bound}_{metric}" for bound in ("min", "max") for metric in FILTER_METRICS)}
+    show_signal_results = any(key in raw_filters for key in filter_keys)
     with connect() as conn:
         run = conn.execute("SELECT * FROM sync_runs WHERE trade_date IS NOT NULL AND status='success' ORDER BY id DESC LIMIT 1").fetchone()
         signal_date = run["trade_date"] if run and run["trade_date"] else ""
@@ -827,5 +830,5 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
         "signals": [{**dict(row), "tones": signal_tones(dict(row))} for row in signals], "recommendations": recommendations,
         "breakout_recommendations": breakout_recommendations, "breakout_environment": breakout_environment,
         "watchlist": [{**dict(row), "tones": signal_tones(dict(row))} for row in watchlist],
-        "filters": filters, "system_errors": recent_system_errors(),
+        "filters": filters, "show_signal_results": show_signal_results, "system_errors": recent_system_errors(),
     }
