@@ -773,8 +773,14 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
                 conditions.append(f"stock_signals.{metric} {'>=' if bound == 'min' else '<='} ?")
                 params.append(value)
             signals = conn.execute(
-                "SELECT stock_signals.*, daily_quotes.close AS close FROM stock_signals "
-                "LEFT JOIN daily_quotes ON daily_quotes.trade_date=stock_signals.trade_date AND daily_quotes.ts_code=stock_signals.ts_code "
+                "SELECT stock_signals.*, current_quote.close AS close, previous_quote.amount AS previous_amount, "
+                "CASE WHEN stock_signals.amount IS NOT NULL AND previous_quote.amount IS NOT NULL "
+                "THEN stock_signals.amount-previous_quote.amount END AS amount_change FROM stock_signals "
+                "LEFT JOIN daily_quotes AS current_quote ON current_quote.trade_date=stock_signals.trade_date AND current_quote.ts_code=stock_signals.ts_code "
+                "LEFT JOIN daily_quotes AS previous_quote ON previous_quote.ts_code=stock_signals.ts_code AND previous_quote.trade_date=("
+                "SELECT MAX(prior.trade_date) FROM daily_quotes AS prior "
+                "WHERE prior.ts_code=stock_signals.ts_code AND prior.trade_date<stock_signals.trade_date "
+                "AND prior.amount IS NOT NULL AND prior.amount>0) "
                 "WHERE " + " AND ".join(conditions) + " ORDER BY stock_signals.main_net_inflow IS NULL, stock_signals.main_net_inflow DESC, stock_signals.score DESC LIMIT 300",
                 params,
             ).fetchall()

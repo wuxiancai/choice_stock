@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS daily_quotes (
   volume_ratio REAL, total_mv REAL, pe REAL, pb REAL, adj_factor REAL, limit_status INTEGER, source TEXT NOT NULL,
   PRIMARY KEY(trade_date, ts_code)
 );
+CREATE INDEX IF NOT EXISTS idx_daily_quotes_code_date ON daily_quotes(ts_code, trade_date DESC);
 CREATE TABLE IF NOT EXISTS sector_snapshots (
   trade_date TEXT NOT NULL, sector_code TEXT NOT NULL, sector_name TEXT NOT NULL,
   pct_chg REAL, amount REAL, main_net_inflow REAL, source TEXT NOT NULL,
