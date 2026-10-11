@@ -29,7 +29,7 @@ MIN_VALID_SECTOR_ROWS = 30
 # is available to an account with 3,000 points or fewer.  Keep this declaration
 # next to the calls so a future provider addition cannot silently reintroduce a
 # higher-tier endpoint.
-TUSHARE_3000_POINT_APIS = frozenset({"trade_cal", "daily", "daily_basic", "moneyflow", "stock_basic", "index_member_all", "adj_factor"})
+TUSHARE_3000_POINT_APIS = frozenset({"trade_cal", "daily", "daily_basic", "moneyflow", "stock_basic", "index_member_all", "adj_factor", "balancesheet", "fina_audit"})
 SW_L1_PAGE_SIZE = 3_000
 _EASTMONEY_HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -184,7 +184,7 @@ def fetch_quotes(
             try:
                 basics = pro.daily_basic(
                     trade_date=trade_date,
-                    fields="ts_code,turnover_rate,volume_ratio,pe_ttm,pb,total_mv",
+                    fields="ts_code,turnover_rate,volume_ratio,pe_ttm,pb,total_mv,limit_status",
                 )
                 basic_map = {r.ts_code: r for r in basics.itertuples()}
             except Exception:
@@ -210,6 +210,7 @@ def fetch_quotes(
             # (TTM), not Tushare's static ``pe`` field.
             "pe": number(basic_map.get(r.ts_code), "pe_ttm"),
             "pb": number(basic_map.get(r.ts_code), "pb"),
+            "limit_status": getattr(basic_map.get(r.ts_code), "limit_status", None) if basic_map.get(r.ts_code) is not None else None,
             "adj_factor": None,
         } for r in frame.itertuples()]
     except ProviderError:
@@ -287,6 +288,33 @@ def fetch_stock_metadata() -> list[dict]:
     if not rows:
         raise ProviderError("股票上市状态未返回有效数据")
     return rows
+
+
+def fetch_financial_risk(ts_code: str, signal_date: str) -> dict:
+    """Read only disclosed audit and balance-sheet facts for one shortlisted stock."""
+    pro = _ts()
+    try:
+        audits = pro.fina_audit(ts_code=ts_code, fields="ts_code,ann_date,end_date,audit_result")
+        balance = pro.balancesheet(
+            ts_code=ts_code,
+            fields="ts_code,ann_date,f_ann_date,end_date,report_type,total_hldr_eqy_exc_min_int",
+        )
+        cutoff = signal_date.replace("-", "")
+        audit_rows = [] if audits is None or audits.empty else [r for r in audits.to_dict("records") if str(r.get("ann_date") or "") <= cutoff]
+        balance_rows = [] if balance is None or balance.empty else [r for r in balance.to_dict("records") if str(r.get("f_ann_date") or r.get("ann_date") or "") <= cutoff and str(r.get("report_type") or "1") == "1"]
+        audit = max(audit_rows, key=lambda r: (str(r.get("ann_date") or ""), str(r.get("end_date") or "")), default=None)
+        statement = max(balance_rows, key=lambda r: (str(r.get("f_ann_date") or r.get("ann_date") or ""), str(r.get("end_date") or "")), default=None)
+        if audit is None or statement is None or statement.get("total_hldr_eqy_exc_min_int") is None or not str(audit.get("audit_result") or "").strip():
+            return {"status": "unverified", "note": "财务审计/净资产数据缺失，暂不列为推荐"}
+        audit_result = str(audit.get("audit_result") or "").strip()
+        equity = float(statement["total_hldr_eqy_exc_min_int"])
+        if equity < 0:
+            return {"status": "rejected", "note": f"股东权益为负（报告期{statement.get('end_date')}）"}
+        if audit_result and audit_result != "标准无保留意见":
+            return {"status": "rejected", "note": f"审计意见需排除/复核：{audit_result}"}
+        return {"status": "verified", "note": f"已核对公告时点财务：权益非负，审计意见{audit_result or '缺失'}；逾期债务、诉讼、立案仍需公告核验"}
+    except Exception as exc:
+        raise ProviderError(f"{ts_code} Tushare财务风险查询失败：{exc}") from exc
 
 
 def fetch_adjustment_factors(trade_date: str) -> dict[str, float]:

@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from .config import settings
 from .database import connect, initialize
 from .indicators import calculate
-from .providers import MIN_VALID_SECTOR_ROWS, ProviderError, fetch_adjustment_factors, fetch_market_index_quotes, fetch_quotes, fetch_sector_history, fetch_sectors, fetch_stock_metadata, recent_trade_dates, trade_dates_since
+from .providers import MIN_VALID_SECTOR_ROWS, ProviderError, fetch_adjustment_factors, fetch_financial_risk, fetch_market_index_quotes, fetch_quotes, fetch_sector_history, fetch_sectors, fetch_stock_metadata, recent_trade_dates, trade_dates_since
 
 
 FILTER_METRICS = (
@@ -379,7 +379,7 @@ def _calculate_daily_breakout_recommendations(conn, signal_date: str) -> tuple[l
     index_rows = [dict(row) for row in conn.execute(
         "SELECT * FROM market_index_quotes WHERE ts_code='000300.SH' AND trade_date<=? ORDER BY trade_date", (signal_date,),
     )]
-    risk_note = "最近120个交易日的个股价格已复权；财报审计、逾期债务、重大诉讼、监管立案及盘口可成交数据未接入，候选须人工核验；本表仅为技术候选"
+    risk_note = "最近120个交易日个股价格已复权；财报审计意见及公告时点股东权益通过 Tushare 按候选逐只核查；逾期债务、重大诉讼、监管立案及盘口可成交能力未接入，仍须人工核验"
     if not index_rows or index_rows[-1]["trade_date"] != signal_date:
         return [], {"mode": "暂停开仓", "reason": "沪深300指数行情没有覆盖信号交易日", "risk_note": risk_note}
     environment = _market_environment(index_rows)
@@ -457,7 +457,7 @@ def _calculate_daily_breakout_recommendations(conn, signal_date: str) -> tuple[l
             values = [row.get(field) for field in ("open", "high", "low", "close")]
             pct_chg = row.get("pct_chg")
             return pct_chg is not None and abs(pct_chg) >= 4.5 and all(value is not None for value in values) and max(values) - min(values) <= max(abs(values[-1]) * 1e-6, 1e-6)
-        if one_price_limit(current):
+        if current.get("limit_status") in (3, 6) or one_price_limit(current):
             continue
         if len(rows) >= 3 and one_price_limit(rows[-2]) and one_price_limit(rows[-3]):
             continue
@@ -517,10 +517,25 @@ def _calculate_daily_breakout_recommendations(conn, signal_date: str) -> tuple[l
     candidates.sort(key=lambda row: (-row["recommendation_score"], row["ts_code"]))
     limit = environment.get("limit", BREAKOUT_MAX_CANDIDATES)
     selected = candidates[:limit]
-    for index, row in enumerate(selected, 1):
+    financially_cleared = []
+    for row in selected:
+        try:
+            financial = fetch_financial_risk(row["ts_code"], signal_date)
+        except ProviderError as exc:
+            financial = {"status": "unverified", "note": "Tushare财务数据查询失败，暂不列为推荐"}
+            record_system_error("breakout.financial_risk", exc)
+        row["financial_risk_status"] = financial["status"]
+        if financial["status"] != "verified":
+            row["risk_note"] = financial["note"] + "；" + risk_note
+            continue
+        row["risk_note"] = financial["note"] + "；" + risk_note
+        financially_cleared.append(row)
+    for index, row in enumerate(financially_cleared, 1):
         row["recommendation_rank"] = index
+    if not financially_cleared and selected:
+        environment["reason"] += "；技术候选未通过或未能完成财务核验"
     environment["risk_note"] = missing_risk_source
-    return selected, environment
+    return financially_cleared, environment
 
 
 def normalize_sync_start_date(value: str | None) -> str | None:
@@ -674,7 +689,7 @@ def sync_latest(start_date: str | None = None) -> dict:
                 # A new current snapshot replaces any older fallback taxonomy for
                 # this date, so five-day matrix rows remain comparable by industry.
                 conn.execute("DELETE FROM sector_snapshots WHERE trade_date=?", (trade_date,))
-            conn.executemany("""INSERT OR REPLACE INTO daily_quotes (trade_date,ts_code,name,open,high,low,close,pct_chg,vol,amount,industry,turnover_rate,volume_ratio,total_mv,pe,pb,adj_factor,source,main_net_inflow) VALUES (:trade_date,:ts_code,:name,:open,:high,:low,:close,:pct_chg,:vol,:amount,:industry,:turnover_rate,:total_mv,:pe,:pb,:adj_factor,'tushare',:main_net_inflow)""", quotes)
+            conn.executemany("""INSERT OR REPLACE INTO daily_quotes (trade_date,ts_code,name,open,high,low,close,pct_chg,vol,amount,industry,turnover_rate,volume_ratio,total_mv,pe,pb,adj_factor,limit_status,source,main_net_inflow) VALUES (:trade_date,:ts_code,:name,:open,:high,:low,:close,:pct_chg,:vol,:amount,:industry,:turnover_rate,:volume_ratio,:total_mv,:pe,:pb,:adj_factor,:limit_status,'tushare',:main_net_inflow)""", quotes)
             for factor_date, factors in adjustment_factors.items():
                 conn.executemany(
                     "UPDATE daily_quotes SET adj_factor=? WHERE trade_date=? AND ts_code=?",
@@ -728,7 +743,7 @@ def dashboard(raw_filters: dict[str, str] | None = None) -> dict:
     initialize()
     filters = normalize_signal_filters(raw_filters or {})
     with connect() as conn:
-        run = conn.execute("SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1").fetchone()
+        run = conn.execute("SELECT * FROM sync_runs WHERE trade_date IS NOT NULL AND status='success' ORDER BY id DESC LIMIT 1").fetchone()
         signal_date = run["trade_date"] if run and run["trade_date"] else ""
         if signal_date:
             dates = [r[0] for r in conn.execute(
